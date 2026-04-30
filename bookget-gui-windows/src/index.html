@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>BookGet GUI (Windows)</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div class="bg-layer"></div>
+    <main class="shell">
+      <header class="topbar card">
+        <div>
+          <h1>BookGet GUI</h1>
+          <p id="appMeta">Windows 工作台</p>
+        </div>
+        <div class="top-actions">
+          <button id="btnSupportedSites" class="ghost">支持网站信息</button>
+          <button id="btnHelp" class="ghost">使用说明</button>
+        </div>
+      </header>
+
+      <section class="layout">
+        <section class="panel card left">
+          <div class="section-head">
+            <h2>下载参数</h2>
+            <span class="pill" id="statePill">就绪</span>
+          </div>
+
+          <label class="field">
+            <span>网址（每行一个）</span>
+            <textarea id="urlText" placeholder="https://..."></textarea>
+          </label>
+
+          <div class="grid-2">
+            <label class="field">
+              <span>最近网址</span>
+              <select id="recentUrlsSelect">
+                <option value="">选择最近网址...</option>
+              </select>
+            </label>
+            <button id="btnInsertRecentUrl" class="ghost action-inline">插入到网址框</button>
+          </div>
+
+          <label class="field">
+            <span>保存到</span>
+            <div class="row">
+              <input id="saveDirectory" type="text" placeholder="请选择目录" />
+              <button id="btnPickDir" class="ghost">选择目录</button>
+            </div>
+          </label>
+
+          <div class="grid-2">
+            <label class="field">
+              <span>最近目录</span>
+              <select id="recentDirsSelect">
+                <option value="">选择最近目录...</option>
+              </select>
+            </label>
+            <button id="btnUseRecentDir" class="ghost action-inline">使用该目录</button>
+          </div>
+
+          <label class="checkbox-row">
+            <input id="needLogin" type="checkbox" />
+            <span>开启弹窗浏览器（适用于需要登录或验证的网站）</span>
+          </label>
+
+          <details id="advancedBlock" class="advanced">
+            <summary>高级参数</summary>
+            <div class="advanced-grid">
+              <label class="field"><span>a (app_mode)</span><input id="appMode" type="text" value="0" /></label>
+              <label class="field"><span>n (threads)</span><input id="concurrency" type="text" value="2" /></label>
+              <label class="field"><span>r (retries)</span><input id="retries" type="text" value="3" /></label>
+              <label class="field"><span>seq</span><input id="seq" type="text" placeholder="4:434" /></label>
+              <label class="field"><span>vol</span><input id="vol" type="text" placeholder="3:6" /></label>
+              <label class="field"><span>interval</span><input id="captureInterval" type="text" placeholder="5" /></label>
+              <label class="field"><span>ext</span><input id="fileExt" type="text" value="_" /></label>
+              <label class="field"><span>UA</span><input id="userAgent" type="text" placeholder="可留空" /></label>
+              <label class="field"><span>Cookie 文件</span><input id="cookieFilePath" type="text" placeholder="可留空" /></label>
+              <label class="field"><span>localStorage 文件</span><input id="localStorageFilePath" type="text" placeholder="可留空" /></label>
+            </div>
+          </details>
+
+          <div class="actions">
+            <button id="btnStart" class="primary">开始</button>
+            <button id="btnPause" class="ghost">暂停</button>
+            <button id="btnResume" class="ghost">继续</button>
+            <button id="btnStop" class="danger">终止</button>
+          </div>
+
+          <div class="actions secondary">
+            <button id="btnExportLog" class="ghost">导出任务日志</button>
+            <button id="btnRestoreLast" class="ghost">恢复上次设置</button>
+            <button id="btnResetAll" class="ghost">恢复初始设置</button>
+            <button id="btnClearRecent" class="ghost">清空最近记录</button>
+          </div>
+        </section>
+
+        <section class="panel card right">
+          <div class="section-head">
+            <h2>任务状态</h2>
+            <span id="statusLine" class="mono">就绪</span>
+          </div>
+
+          <div class="stats">
+            <span id="statTotal">总 0</span>
+            <span id="statDone">完成 0</span>
+            <span id="statStopped">终止 0</span>
+            <span id="statFailed">失败 0</span>
+          </div>
+
+          <div id="queueList" class="queue"></div>
+
+          <div class="section-head log-head">
+            <h2>实时日志</h2>
+            <span class="mono" id="logHint">仅展示最近日志片段</span>
+          </div>
+          <pre id="logBox" class="logbox"></pre>
+        </section>
+      </section>
+    </main>
+
+    <dialog id="sitesDialog" class="sites-dialog">
+      <form method="dialog" class="sites-form">
+        <header>
+          <h3>支持网站（与 macOS 版一致）</h3>
+          <button value="cancel" class="ghost">关闭</button>
+        </header>
+        <label class="field">
+          <span>搜索</span>
+          <input id="siteSearch" type="text" placeholder="输入域名关键词" />
+        </label>
+        <div id="siteList" class="site-list"></div>
+      </form>
+    </dialog>
+
+    <dialog id="helpDialog" class="sites-dialog">
+      <form method="dialog" class="sites-form">
+        <header>
+          <h3>Windows 版弹窗说明</h3>
+          <button value="cancel" class="ghost">关闭</button>
+        </header>
+        <div class="help-copy">
+          <p>当出现登录弹窗时，请在弹窗窗口中完成登录/验证码。</p>
+          <p>完成后按 <code>F8</code> 继续下载；按 <code>Esc</code> 取消当前任务。</p>
+          <p><code>rbook.ncl.edu.tw</code> 专用模式下，请先进入阅读器页面再按 <code>F8</code>。</p>
+        </div>
+      </form>
+    </dialog>
+
+    <script src="./renderer.js" defer></script>
+  </body>
+</html>

@@ -1,0 +1,67 @@
+{
+  "name": "bookget-gui-windows",
+  "version": "25.0417.0",
+  "private": true,
+  "description": "BookGet Windows GUI compatible with the macOS GUI workflow.",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "electron electron/main.cjs",
+    "dev": "electron electron/main.cjs",
+    "dist": "electron-builder --win nsis portable --config.win.signAndEditExecutable=false"
+  },
+  "devDependencies": {
+    "electron": "^31.7.7",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.bookget.gui.windows",
+    "productName": "BookGet GUI (Windows)",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "electron/**/*",
+      "src/**/*",
+      "package.json",
+      "README.md"
+    ],
+    "extraResources": [
+      {
+        "from": "resources/bin",
+        "to": "bin",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "BookGet GUI",
+      "artifactName": "BookGet-GUI-Windows-Setup-${version}-${arch}.${ext}"
+    },
+    "portable": {
+      "artifactName": "BookGet-GUI-Windows-Portable-${version}-${arch}.${ext}"
+    }
+  }
+}
