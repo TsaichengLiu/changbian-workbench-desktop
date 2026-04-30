@@ -1,5 +1,5 @@
 const { EventEmitter } = require("events");
-const { spawn } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -56,6 +56,14 @@ function isNameConflictLog(logText) {
     return true;
   }
   return false;
+}
+
+function isUnknownFlagLog(logText, flagName) {
+  const s = String(logText || "");
+  if (!s) return false;
+  const f = String(flagName || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const re = new RegExp(`unknown\\s+shorthand\\s+flag:\\s*'${f}'\\s+in\\s+-${f}`, "i");
+  return re.test(s);
 }
 
 function splitUrls(urlText) {
@@ -257,6 +265,8 @@ class BookGetTaskRunner extends EventEmitter {
     this.finalUrlByHost = new Map();
     this.runtimeBinCache = null;
     this.runtimeBinNoticeShown = false;
+    this.coreCliStyle = "";
+    this.coreCliStyleLogged = false;
   }
 
   getSnapshot() {
@@ -295,6 +305,8 @@ class BookGetTaskRunner extends EventEmitter {
     this.logBuffer = "";
     this.runtimeBinCache = null;
     this.runtimeBinNoticeShown = false;
+    this.coreCliStyle = "";
+    this.coreCliStyleLogged = false;
 
     this.currentRun = {
       id: randomUUID(),
@@ -506,7 +518,7 @@ class BookGetTaskRunner extends EventEmitter {
         if (mode === "2" && runURL !== prepared.url) {
           this.emitLog(`[bookget wrapper] resolved page URL to IIIF manifest: ${runURL}\n`);
         }
-        this.emitLog(`[bookget wrapper] auto mode try -a ${mode}: ${runURL}\n`);
+        this.emitLog(`[bookget wrapper] auto mode try m=${mode}: ${runURL}\n`);
         const r = await this.runCoreForURL(runURL, options, {
           modeOverride: mode,
           index: idx,
@@ -563,9 +575,9 @@ class BookGetTaskRunner extends EventEmitter {
           this.currentRun.modeTriedByIndex[idx].push(nextMode);
           this.state = "retrying";
           this.currentRun.queue[idx].state = "retrying";
-          this.currentRun.queue[idx].note = `URL 不兼容，切换模式 a=${nextMode} 重试`;
+          this.currentRun.queue[idx].note = `URL 不兼容，切换模式 m=${nextMode} 重试`;
           this.emitQueue();
-          this.emitState("retrying", `检测到 Unsupported URL，自动切换识别模式 a=${nextMode} 重试。`);
+          this.emitState("retrying", `检测到 Unsupported URL，自动切换识别模式 m=${nextMode} 重试。`);
           continue;
         }
         return { code: 2, note: "不支持该网址" };
@@ -1234,49 +1246,142 @@ class BookGetTaskRunner extends EventEmitter {
     return cache;
   }
 
-  async runCoreForURL(url, options, runOpts) {
+  detectCoreCliStyle(corePath, cwd) {
+    if (this.coreCliStyle) {
+      return this.coreCliStyle;
+    }
+
+    let help = "";
+    try {
+      const r = spawnSync(corePath, ["--help"], {
+        cwd,
+        windowsHide: true,
+        timeout: 8000,
+        encoding: "utf8",
+      });
+      help = `${r?.stdout || ""}\n${r?.stderr || ""}`;
+    } catch {
+      help = "";
+    }
+
+    const style = /--downloader_mode|--dir|--cookies|-\s*O,\s*--dir/i.test(help) ? "modern" : "legacy";
+    this.coreCliStyle = style;
+    if (!this.coreCliStyleLogged) {
+      this.coreCliStyleLogged = true;
+      this.emitLog(`[bookget wrapper] detected core CLI style: ${style}\n`);
+    }
+    return style;
+  }
+
+  buildCoreArgs(url, options, runOpts, style) {
     const modeOverride = runOpts.modeOverride || "";
     const idx = runOpts.index;
-    const outputOverride = this.currentRun.outputOverrideByIndex[idx] || options.outputDirectory;
+    const outputOverride = this.currentRun?.outputOverrideByIndex?.[idx] || options.outputDirectory;
 
     const args = [];
-    args.push("-o", outputOverride);
+    if (style === "modern") {
+      args.push("-O", outputOverride);
+    } else {
+      args.push("-o", outputOverride);
+    }
 
     if (options.showAdvanced) {
       const mode = modeOverride || String(options.appMode || "").trim();
-      if (mode) args.push("-a", mode);
-      if (String(options.concurrency || "").trim()) args.push("-n", String(options.concurrency).trim());
-      if (String(options.retries || "").trim()) args.push("-r", String(options.retries).trim());
-      if (String(options.seq || "").trim()) args.push("-seq", String(options.seq).trim());
-      if (String(options.vol || "").trim()) args.push("-vol", String(options.vol).trim());
+      if (mode) {
+        if (style === "modern") {
+          args.push("-m", mode);
+        } else {
+          args.push("-a", mode);
+        }
+      }
+
+      if (String(options.concurrency || "").trim()) {
+        args.push("-n", String(options.concurrency).trim());
+      }
+
+      if (String(options.retries || "").trim()) {
+        if (style === "modern") {
+          args.push("--retries", String(options.retries).trim());
+        } else {
+          args.push("-r", String(options.retries).trim());
+        }
+      }
+
+      if (String(options.seq || "").trim()) {
+        if (style === "modern") {
+          args.push("-p", String(options.seq).trim());
+        } else {
+          args.push("-seq", String(options.seq).trim());
+        }
+      }
+
+      if (String(options.vol || "").trim()) {
+        if (style === "modern") {
+          args.push("-v", String(options.vol).trim());
+        } else {
+          args.push("-vol", String(options.vol).trim());
+        }
+      }
+
       const interval = normalizeIntervalValue(options.captureInterval || "");
       if (interval) {
-        args.push("-interval", interval, "-speed", interval);
+        if (style === "modern") {
+          args.push("--sleep", String(Math.max(1, Math.round(Number(interval) || 1))));
+        } else {
+          args.push("-interval", interval, "-speed", interval);
+        }
       }
+
       if (String(options.fileExt || "_").trim() !== "_") {
         args.push("-ext", String(options.fileExt).trim());
       }
+
       if (String(options.userAgent || "").trim()) {
-        args.push("-ua", String(options.userAgent).trim());
+        if (style === "modern") {
+          args.push("-U", String(options.userAgent).trim());
+        } else {
+          args.push("-ua", String(options.userAgent).trim());
+        }
       }
+
       const cookieOverride = this.loginCookieForURL(url);
       const cookiePath = cookieOverride || String(options.cookieFilePath || "").trim();
       if (cookiePath) {
-        args.push("-c", cookiePath);
+        if (style === "modern") {
+          args.push("-C", cookiePath);
+        } else {
+          args.push("-c", cookiePath);
+        }
       }
+
       if (String(options.localStorageFilePath || "").trim()) {
-        args.push("-localStorage", String(options.localStorageFilePath).trim());
+        if (style === "modern") {
+          this.emitLog("[bookget wrapper] core CLI style modern: localStorage flag is unsupported and was skipped\n");
+        } else {
+          args.push("-localStorage", String(options.localStorageFilePath).trim());
+        }
       }
     } else if (modeOverride) {
-      args.push("-a", modeOverride);
+      if (style === "modern") {
+        args.push("-m", modeOverride);
+      } else {
+        args.push("-a", modeOverride);
+      }
       const cookieOverride = this.loginCookieForURL(url);
       if (cookieOverride) {
-        args.push("-c", cookieOverride);
+        if (style === "modern") {
+          args.push("-C", cookieOverride);
+        } else {
+          args.push("-c", cookieOverride);
+        }
       }
     }
 
     args.push(url);
+    return args;
+  }
 
+  async runCoreForURL(url, options, runOpts) {
     const sourceBinDir = this.getBinDir();
     const runtime = this.resolveRuntimeBinDir(sourceBinDir);
     const binDir = runtime.runtimeBinDir;
@@ -1291,7 +1396,28 @@ class BookGetTaskRunner extends EventEmitter {
       this.emitLog(`[bookget wrapper] runtime bin staged to: ${binDir}\n`);
     }
 
-    const log = await this.spawnProcess(corePath, args, binDir);
+    const style = this.detectCoreCliStyle(corePath, binDir);
+    let args = this.buildCoreArgs(url, options, runOpts, style);
+    let log = await this.spawnProcess(corePath, args, binDir);
+
+    if (style === "legacy" && isUnknownFlagLog(log.logText, "o")) {
+      args = this.buildCoreArgs(url, options, runOpts, "modern");
+      log = await this.spawnProcess(corePath, args, binDir);
+      this.coreCliStyle = "modern";
+      if (!this.coreCliStyleLogged) {
+        this.coreCliStyleLogged = true;
+        this.emitLog("[bookget wrapper] switched core CLI style to modern by runtime probe\n");
+      }
+    } else if (style === "modern" && isUnknownFlagLog(log.logText, "O")) {
+      args = this.buildCoreArgs(url, options, runOpts, "legacy");
+      log = await this.spawnProcess(corePath, args, binDir);
+      this.coreCliStyle = "legacy";
+      if (!this.coreCliStyleLogged) {
+        this.coreCliStyleLogged = true;
+        this.emitLog("[bookget wrapper] switched core CLI style to legacy by runtime probe\n");
+      }
+    }
+
     return log;
   }
 
