@@ -7,7 +7,12 @@
   "scripts": {
     "start": "electron electron/main.cjs",
     "dev": "electron electron/main.cjs",
-    "dist": "electron-builder --win nsis portable --config.win.signAndEditExecutable=false"
+    "dist": "npm run dist:unsigned",
+    "dist:unsigned": "electron-builder --win nsis portable --config.win.signAndEditExecutable=false",
+    "dist:unsigned:x64": "electron-builder --win nsis portable --x64 --config.win.signAndEditExecutable=false",
+    "dist:unsigned:arm64": "electron-builder --win nsis portable --arm64 --config.win.signAndEditExecutable=false",
+    "sign:artifacts": "powershell -ExecutionPolicy Bypass -File scripts/signing/sign-artifacts.ps1 -ArtifactsDir release",
+    "verify:signatures": "powershell -ExecutionPolicy Bypass -File scripts/signing/verify-signatures.ps1 -ArtifactsDir release"
   },
   "devDependencies": {
     "electron": "^31.7.7",

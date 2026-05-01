@@ -1,0 +1,76 @@
+name: windows-signed-release
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag_name:
+        description: "Release tag, e.g. v25.0417.1"
+        required: true
+      release_name:
+        description: "Release title"
+        required: true
+
+jobs:
+  build-sign-release:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: bookget-gui-windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: bookget-gui-windows/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Restore signing certificate
+        shell: pwsh
+        run: |
+          if ("${{ secrets.WIN_CERT_PFX_BASE64 }}" -eq "") {
+            throw "Missing secret WIN_CERT_PFX_BASE64"
+          }
+          $certPath = Join-Path $env:RUNNER_TEMP "codesign.pfx"
+          [IO.File]::WriteAllBytes($certPath, [Convert]::FromBase64String("${{ secrets.WIN_CERT_PFX_BASE64 }}"))
+          "WIN_CERT_PATH=$certPath" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build unsigned x64 artifacts
+        run: npm run dist:unsigned:x64
+
+      - name: Sign artifacts
+        shell: pwsh
+        env:
+          WIN_CERT_PASSWORD: ${{ secrets.WIN_CERT_PASSWORD }}
+        run: |
+          npm run sign:artifacts
+
+      - name: Verify signatures
+        shell: pwsh
+        run: |
+          npm run verify:signatures
+
+      - name: Upload CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-signed-x64
+          path: |
+            bookget-gui-windows/release/BookGet-GUI-Windows-Setup-*-x64.exe
+            bookget-gui-windows/release/BookGet-GUI-Windows-Portable-*-x64.exe
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.event.inputs.tag_name }}
+          name: ${{ github.event.inputs.release_name }}
+          draft: false
+          prerelease: false
+          files: |
+            bookget-gui-windows/release/BookGet-GUI-Windows-Setup-*-x64.exe
+            bookget-gui-windows/release/BookGet-GUI-Windows-Portable-*-x64.exe
