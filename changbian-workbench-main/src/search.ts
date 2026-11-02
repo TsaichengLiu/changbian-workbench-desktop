@@ -15,6 +15,10 @@ function clean(text: string): string {
   return text.toLocaleLowerCase().replace(/\s+/g, " ").trim();
 }
 
+export function toSimplified(text: string): string {
+  return twToCnConverter ? twToCnConverter(text) : text;
+}
+
 export function buildVariants(text: string): string[] {
   const base = clean(text);
   if (!base) {

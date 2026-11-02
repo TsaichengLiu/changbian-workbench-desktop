@@ -12,6 +12,7 @@ import {
   useTransition,
 } from "react";
 import type { ExportScope } from "./exporters";
+import { toSimplified } from "./search";
 import type { SearchCriteria, SearchResult } from "./search-engine";
 import type { Chapter, Entry, Project, TrashItem, WorkspaceData } from "./types";
 import { createId, reorderById, summarize } from "./utils";
@@ -1002,10 +1003,6 @@ function escapeHtml(text: string): string {
     .replace(/'/g, "&#39;");
 }
 
-function escapeRegexToken(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
 function buildHighlightTokens(query: string): string[] {
   return Array.from(
     new Set(
@@ -1018,25 +1015,89 @@ function buildHighlightTokens(query: string): string[] {
   ).sort((a, b) => b.length - a.length);
 }
 
-function findFirstTokenMatch(text: string, tokens: string[]): { index: number; length: number } | null {
-  const haystack = text.toLocaleLowerCase();
-  let match: { index: number; length: number } | null = null;
+// 高亮與檢索一樣繁簡互通：原文與關鍵字都逐字轉成簡體、小寫後比對，再把位置對應回原文。
+// 逐字轉換保證位置一一對應，也讓「爲」「説」等舊字形能對上簡體輸入。
+const highlightFoldCache = new Map<string, string>();
 
+function foldHighlightChar(char: string): string {
+  let folded = highlightFoldCache.get(char);
+  if (folded === undefined) {
+    folded = toSimplified(char).toLocaleLowerCase();
+    highlightFoldCache.set(char, folded);
+  }
+  return folded;
+}
+
+function foldForHighlight(text: string): { folded: string; starts: number[]; ends: number[] } {
+  let folded = "";
+  const starts: number[] = [];
+  const ends: number[] = [];
+  let offset = 0;
+  for (const char of text) {
+    const piece = foldHighlightChar(char);
+    for (let index = 0; index < piece.length; index += 1) {
+      starts.push(offset);
+      ends.push(offset + char.length);
+    }
+    folded += piece;
+    offset += char.length;
+  }
+  return { folded, starts, ends };
+}
+
+function findHighlightRanges(text: string, tokens: string[]): Array<{ start: number; end: number }> {
+  if (!text || tokens.length === 0) {
+    return [];
+  }
+  const { folded, starts, ends } = foldForHighlight(text);
+  const ranges: Array<{ start: number; end: number }> = [];
   for (const token of tokens) {
-    const needle = token.trim().toLocaleLowerCase();
+    const needle = foldForHighlight(token).folded;
     if (!needle) {
       continue;
     }
-    const index = haystack.indexOf(needle);
-    if (index < 0) {
-      continue;
-    }
-    if (!match || index < match.index || (index === match.index && needle.length > match.length)) {
-      match = { index, length: needle.length };
+    let index = folded.indexOf(needle);
+    while (index >= 0) {
+      ranges.push({ start: starts[index], end: ends[index + needle.length - 1] });
+      index = folded.indexOf(needle, index + needle.length);
     }
   }
+  ranges.sort((a, b) => a.start - b.start || b.end - a.end);
+  const merged: Array<{ start: number; end: number }> = [];
+  for (const range of ranges) {
+    const last = merged[merged.length - 1];
+    if (last && range.start <= last.end) {
+      last.end = Math.max(last.end, range.end);
+    } else {
+      merged.push({ ...range });
+    }
+  }
+  return merged;
+}
 
-  return match;
+function wrapHighlightRanges(text: string, tokens: string[]): string {
+  let html = "";
+  let cursor = 0;
+  for (const range of findHighlightRanges(text, tokens)) {
+    html += escapeHtml(text.slice(cursor, range.start));
+    html += `<mark class="match-highlight">${escapeHtml(text.slice(range.start, range.end))}</mark>`;
+    cursor = range.end;
+  }
+  return html + escapeHtml(text.slice(cursor));
+}
+
+function findFirstTokenMatch(text: string, tokens: string[]): { index: number; length: number } | null {
+  const [first] = findHighlightRanges(text, tokens);
+  return first ? { index: first.start, length: first.end - first.start } : null;
+}
+
+function hasHighlightMatch(text: string, query: string): boolean {
+  return findHighlightRanges(text, buildHighlightTokens(query)).length > 0;
+}
+
+// 檢索結果卡上的備註摘錄：標籤已另以標籤顯示，摘錄只取標籤以外的文字。
+function noteTextWithoutTags(note: string): string {
+  return note.replace(TAG_REGEX, " ").replace(/\s+/g, " ").trim();
 }
 
 function summarizeAroundMatch(text: string, query: string, max = 120): string {
@@ -1078,28 +1139,12 @@ function summarizeAroundMatch(text: string, query: string, max = 120): string {
 }
 
 function renderHighlightedPlainText(text: string, query: string): string {
-  let html = escapeHtml(text || "");
-  const tokens = buildHighlightTokens(query);
-  for (const token of tokens) {
-    const escapedToken = escapeRegexToken(escapeHtml(token));
-    html = html.replace(
-      new RegExp(escapedToken, "gi"),
-      (match) => `<mark class="match-highlight">${match}</mark>`,
-    );
-  }
+  const html = wrapHighlightRanges(text || "", buildHighlightTokens(query));
   return html.replace(/\r?\n/g, "<br />");
 }
 
 function renderHighlightedLightMarkup(text: string, query: string): string {
-  let html = escapeHtml(text || "");
-  const tokens = buildHighlightTokens(query);
-  for (const token of tokens) {
-    const escapedToken = escapeRegexToken(escapeHtml(token));
-    html = html.replace(
-      new RegExp(escapedToken, "gi"),
-      (match) => `<mark class="match-highlight">${match}</mark>`,
-    );
-  }
+  let html = wrapHighlightRanges(text || "", buildHighlightTokens(query));
   html = html.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
   html = html.replace(/__([^_\n]+)__/g, "<u>$1</u>");
   html = html.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
@@ -5561,9 +5606,13 @@ function App() {
                     {tags.length > 0 && (
                       <div className="tag-row">
                         {tags.map((tag) => (
-                          <span key={`${entry.id}-${tag}`} className="tag-chip">
-                            {tag}
-                          </span>
+                          <span
+                            key={`${entry.id}-${tag}`}
+                            className="tag-chip"
+                            dangerouslySetInnerHTML={{
+                              __html: renderHighlightedPlainText(tag, centerEntryHighlightQuery),
+                            }}
+                          />
                         ))}
                       </div>
                     )}
@@ -5656,6 +5705,7 @@ function App() {
                       searchHighlightQuery,
                       100,
                     );
+                    const notePreviewText = noteTextWithoutTags(entry?.note ?? "");
 
                     return (
                       <button
@@ -5708,12 +5758,27 @@ function App() {
                             ),
                           }}
                         />
+                        {notePreviewText && hasHighlightMatch(notePreviewText, searchHighlightQuery) && (
+                          <div
+                            className="search-citation"
+                            dangerouslySetInnerHTML={{
+                              __html: `備註：${renderHighlightedPlainText(
+                                summarizeAroundMatch(notePreviewText, searchHighlightQuery, 100),
+                                searchHighlightQuery,
+                              )}`,
+                            }}
+                          />
+                        )}
                         {result.tags.length > 0 && (
                           <div className="tag-row">
                             {result.tags.map((tag) => (
-                              <span key={`${result.entryId}-${tag}`} className="tag-chip">
-                                {tag}
-                              </span>
+                              <span
+                                key={`${result.entryId}-${tag}`}
+                                className="tag-chip"
+                                dangerouslySetInnerHTML={{
+                                  __html: renderHighlightedPlainText(tag, searchHighlightQuery),
+                                }}
+                              />
                             ))}
                           </div>
                         )}
@@ -6920,12 +6985,28 @@ function App() {
                                 ),
                               }}
                             />
+                            {entry?.note &&
+                              hasHighlightMatch(noteTextWithoutTags(entry.note), advancedHighlightQuery) && (
+                              <div
+                                className="search-citation"
+                                dangerouslySetInnerHTML={{
+                                  __html: `備註：${renderHighlightedPlainText(
+                                    summarizeAroundMatch(noteTextWithoutTags(entry.note), advancedHighlightQuery, 120),
+                                    advancedHighlightQuery,
+                                  )}`,
+                                }}
+                              />
+                            )}
                             {result.tags.length > 0 && (
                               <div className="tag-row">
                                 {result.tags.map((tag) => (
-                                  <span key={`${result.entryId}-advanced-${tag}`} className="tag-chip">
-                                    {tag}
-                                  </span>
+                                  <span
+                                    key={`${result.entryId}-advanced-${tag}`}
+                                    className="tag-chip"
+                                    dangerouslySetInnerHTML={{
+                                      __html: renderHighlightedPlainText(tag, advancedHighlightQuery),
+                                    }}
+                                  />
                                 ))}
                               </div>
                             )}
