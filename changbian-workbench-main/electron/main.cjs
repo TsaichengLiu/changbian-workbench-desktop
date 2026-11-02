@@ -107,6 +107,80 @@ const searchIndexService = new SearchIndexService({
   getWorkspaceFilePath: () => sharedWorkspaceFile,
 });
 
+// 關窗／退出前請渲染程序先寫出去抖中的修改。
+const CLOSE_FLUSH_TIMEOUT_MS = 5000;
+let isQuitting = false;
+let closeFlushRequestSeq = 0;
+const pendingCloseFlushRequests = new Map();
+const closeFlushReadyContents = new Set();
+
+function requestRendererFlush(win) {
+  return new Promise((resolve) => {
+    closeFlushRequestSeq += 1;
+    const requestId = closeFlushRequestSeq;
+    const timer = setTimeout(() => {
+      pendingCloseFlushRequests.delete(requestId);
+      resolve(null);
+    }, CLOSE_FLUSH_TIMEOUT_MS);
+    pendingCloseFlushRequests.set(requestId, (result) => {
+      clearTimeout(timer);
+      resolve(result && typeof result === "object" ? result : null);
+    });
+    win.webContents.send("app:close-flush-request", requestId);
+  });
+}
+
+async function confirmWindowClose(win) {
+  if (win.isDestroyed() || win.webContents.isCrashed() || !closeFlushReadyContents.has(win.webContents.id)) {
+    return true;
+  }
+  const result = await requestRendererFlush(win);
+  if (win.isDestroyed()) {
+    return true;
+  }
+
+  let message = "";
+  let detail = "";
+  if (!result) {
+    message = "長編工作臺沒有回應存檔請求。";
+    detail = "現在關閉，最近幾秒的修改可能會遺失。";
+  } else if (result.hasUnsavedDraft) {
+    message = "有一條史料還在編輯中，尚未保存。";
+    detail = "現在關閉，這條史料的修改會遺失。";
+  } else if (!result.saved) {
+    message = "最近的修改未能寫入資料檔。";
+    detail = "現在關閉，這些修改可能會遺失。建議先取消，到「檔案資料管理」中備份。";
+  } else {
+    return true;
+  }
+
+  const { response } = await dialog.showMessageBox(win, {
+    type: "warning",
+    buttons: ["取消", "仍要關閉"],
+    defaultId: 0,
+    cancelId: 0,
+    message,
+    detail,
+  });
+  return response === 1;
+}
+
+ipcMain.on("app:close-flush-ready", (event, ready) => {
+  if (ready) {
+    closeFlushReadyContents.add(event.sender.id);
+  } else {
+    closeFlushReadyContents.delete(event.sender.id);
+  }
+});
+
+ipcMain.on("app:close-flush-done", (_event, requestId, result) => {
+  const resolve = pendingCloseFlushRequests.get(requestId);
+  if (resolve) {
+    pendingCloseFlushRequests.delete(requestId);
+    resolve(result);
+  }
+});
+
 function broadcastAppearance() {
   const payload = { ...currentAppearance };
   for (const win of BrowserWindow.getAllWindows()) {
@@ -319,7 +393,19 @@ function buildAppMenuTemplate() {
       label: "外觀",
       submenu: buildAppearanceSubmenu(),
     },
-    { role: "viewMenu" },
+    // 打包版不提供重新載入：重新載入不會觸發關窗前的存檔。
+    isDev
+      ? { role: "viewMenu" }
+      : {
+          role: "viewMenu",
+          submenu: [
+            { role: "resetZoom" },
+            { role: "zoomIn" },
+            { role: "zoomOut" },
+            { type: "separator" },
+            { role: "togglefullscreen" },
+          ],
+        },
     { role: "windowMenu" },
   ];
 
@@ -474,6 +560,41 @@ function createWindow() {
       mainWindow.webContents.send("appearance:changed", { ...currentAppearance });
     }
   });
+
+  const contentsId = mainWindow.webContents.id;
+  mainWindow.webContents.on("did-start-loading", () => {
+    closeFlushReadyContents.delete(contentsId);
+  });
+
+  let closeApproved = false;
+  let closeCheckInProgress = false;
+  mainWindow.on("close", (event) => {
+    if (closeApproved) {
+      return;
+    }
+    event.preventDefault();
+    if (closeCheckInProgress) {
+      return;
+    }
+    closeCheckInProgress = true;
+    void confirmWindowClose(mainWindow).then((proceed) => {
+      closeCheckInProgress = false;
+      if (!proceed) {
+        isQuitting = false;
+        return;
+      }
+      closeApproved = true;
+      if (isQuitting) {
+        app.quit();
+      } else if (!mainWindow.isDestroyed()) {
+        mainWindow.close();
+      }
+    });
+  });
+
+  mainWindow.on("closed", () => {
+    closeFlushReadyContents.delete(contentsId);
+  });
 }
 
 app.whenReady().then(() => {
@@ -500,6 +621,11 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  isQuitting = true;
+});
+
+// 視窗關閉前仍可能寫出最後一次存檔，所以清理要等到 will-quit。
+app.on("will-quit", () => {
   stopWorkspaceWatcher();
   searchIndexService.close();
 });

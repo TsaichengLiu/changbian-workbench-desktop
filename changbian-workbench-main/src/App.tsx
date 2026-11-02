@@ -20,6 +20,7 @@ const STORAGE_KEY = "longform_history_workbench_v3";
 const APPEARANCE_KEY = "longform_history_workbench_appearance_v1";
 const WORKSPACE_SCHEMA_VERSION = 1;
 const WORKSPACE_SAVE_DEBOUNCE_MS = 450;
+const LOCAL_BACKUP_FAILED_STATUS = "本機瀏覽器備份寫入失敗（儲存空間可能已滿）";
 const TRASH_ITEM_LIMIT = 100;
 
 type UiThemeId = "changbian" | "obsidian" | "ocean" | "graphite" | "dusk" | "vaporwave";
@@ -410,6 +411,16 @@ function createEmptyEntryDraft(): EntryDraft {
     note: "",
     citation: "",
   };
+}
+
+function entryDraftsEqual(a: EntryDraft, b: EntryDraft): boolean {
+  return (
+    a.timeText === b.timeText &&
+    a.summary === b.summary &&
+    a.sourceText === b.sourceText &&
+    a.note === b.note &&
+    a.citation === b.citation
+  );
 }
 
 function extractTags(text: string): string[] {
@@ -880,6 +891,16 @@ function workspaceContentSignature(workspace: WorkspaceData): string {
   });
 }
 
+// localStorage 超出配額時 setItem 會拋錯；不能讓它中斷資料檔存檔。
+function writeLocalStorage(key: string, value: unknown): boolean {
+  try {
+    localStorage.setItem(key, JSON.stringify(value));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function loadWorkspace(): WorkspaceData {
   const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) {
@@ -1291,6 +1312,10 @@ function App() {
   const workspaceSaveInFlightRef = useRef(false);
   const workspaceSaveQueuedRef = useRef(false);
   workspaceRef.current = workspace;
+  const modalOrdersRef = useRef(modalOrders);
+  modalOrdersRef.current = modalOrders;
+  const modalStateRef = useRef(modalState);
+  modalStateRef.current = modalState;
 
   const activeProject = workspace.activeProjectId
     ? workspace.projects[workspace.activeProjectId] ?? null
@@ -1948,9 +1973,21 @@ function App() {
   async function persistLatestWorkspace(): Promise<void> {
     const payload = workspaceRef.current;
     const payloadSignature = workspaceContentSignature(payload);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+    const localBackupOk = writeLocalStorage(STORAGE_KEY, payload);
+    setStorageStatus((current) => {
+      const showingBackupFailure = current.startsWith(LOCAL_BACKUP_FAILED_STATUS);
+      if (localBackupOk) {
+        return showingBackupFailure ? "" : current;
+      }
+      return showingBackupFailure ? current : `${LOCAL_BACKUP_FAILED_STATUS}，建議清理回收站或匯出備份。`;
+    });
 
     if (!sharedSyncReady || !window.workspaceBridge?.saveSharedWorkspace) {
+      if (!localBackupOk) {
+        // 瀏覽器模式下本機備份是唯一的儲存位置。
+        setSaveState("error");
+        return;
+      }
       lastPersistedSignatureRef.current = payloadSignature;
       setSaveState("local");
       return;
@@ -2070,6 +2107,42 @@ function App() {
     };
   }, [contentSignature, sharedSyncReady]);
 
+  // 關窗或退出前由主程序呼叫：立即寫出去抖中的修改，並等待進行中的存檔完成。
+  async function flushPendingWorkspaceSave(): Promise<boolean> {
+    if (workspaceSaveTimerRef.current !== null) {
+      window.clearTimeout(workspaceSaveTimerRef.current);
+      workspaceSaveTimerRef.current = null;
+    }
+    for (let attempt = 0; attempt < 40; attempt += 1) {
+      if (workspaceSaveInFlightRef.current) {
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+        continue;
+      }
+      if (workspaceContentSignature(workspaceRef.current) === lastPersistedSignatureRef.current) {
+        return true;
+      }
+      await persistLatestWorkspace();
+      if (
+        !workspaceSaveInFlightRef.current &&
+        workspaceContentSignature(workspaceRef.current) !== lastPersistedSignatureRef.current
+      ) {
+        return false;
+      }
+    }
+    return false;
+  }
+
+  useEffect(() => {
+    const bridge = window.workspaceBridge;
+    if (!sharedSyncReady || !bridge?.onCloseFlushRequest) {
+      return undefined;
+    }
+    return bridge.onCloseFlushRequest(async () => ({
+      saved: await flushPendingWorkspaceSave(),
+      hasUnsavedDraft: hasUnsavedEntryDraft(modalStateRef.current),
+    }));
+  }, [sharedSyncReady]);
+
   useEffect(() => {
     const bridge = window.workspaceBridge;
     if (!sharedSyncReady || !bridge?.onExternalWorkspaceChanged) {
@@ -2103,14 +2176,14 @@ function App() {
 
   useEffect(() => {
     const flushLocalBackup = () => {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(workspaceRef.current));
+      writeLocalStorage(STORAGE_KEY, workspaceRef.current);
     };
     window.addEventListener("beforeunload", flushLocalBackup);
     return () => window.removeEventListener("beforeunload", flushLocalBackup);
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(APPEARANCE_KEY, JSON.stringify(appearance));
+    writeLocalStorage(APPEARANCE_KEY, appearance);
     if (!window.appearanceBridge?.setAppearance) {
       return;
     }
@@ -2179,15 +2252,22 @@ function App() {
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        setModalState(null);
-        setContextMenu(null);
-        setMergeModal((state) => ({ ...state, open: false }));
-        setAdvancedModal((state) => ({ ...state, open: false }));
-        setChapterMergeModal((state) => ({ ...state, open: false }));
-        setStorageSaveAsModalOpen(false);
-        setStorageFormatInfoModalOpen(false);
-        setStorageModalOpen(false);
-        setTrashModalOpen(false);
+        // 輸入法組字時的 Esc 只用來取消候選字，不應關閉彈窗。
+        if (event.isComposing || event.keyCode === 229) {
+          return;
+        }
+        if (contextMenu) {
+          setContextMenu(null);
+          return;
+        }
+        // 只關閉最上層的彈窗。
+        const openKeys = OVERLAY_MODAL_KEYS.filter((key) => modalOpenStateRef.current[key]);
+        if (openKeys.length > 0) {
+          const orders = modalOrdersRef.current;
+          const topKey = openKeys.reduce((top, key) => (orders[key] >= orders[top] ? key : top));
+          event.preventDefault();
+          requestCloseOverlayModal(topKey);
+        }
         return;
       }
 
@@ -4392,6 +4472,51 @@ function App() {
     setStorageFormatInfoModalOpen(false);
   }
 
+  function hasUnsavedEntryDraft(state: ModalState): boolean {
+    if (!state) {
+      return false;
+    }
+    if (state.kind === "entry-create") {
+      return !entryDraftsEqual(state.draft, createEmptyEntryDraft());
+    }
+    if ((state.kind === "entry-view" && state.editing) || state.kind === "entry-edit") {
+      const entry = workspaceRef.current.entries[state.entryId];
+      return Boolean(entry) && !entryDraftsEqual(state.draft, entryToDraft(entry));
+    }
+    return false;
+  }
+
+  function requestCloseOverlayModal(key: OverlayModalKey): void {
+    switch (key) {
+      case "storage":
+        closeStorageModal();
+        return;
+      case "trash":
+        setTrashModalOpen(false);
+        return;
+      case "storage-save-as":
+        setStorageSaveAsModalOpen(false);
+        return;
+      case "storage-format-info":
+        setStorageFormatInfoModalOpen(false);
+        return;
+      case "advanced":
+        setAdvancedModal((state) => ({ ...state, open: false }));
+        return;
+      case "merge-project":
+        setMergeModal((state) => ({ ...state, open: false }));
+        return;
+      case "merge-chapter":
+        setChapterMergeModal((state) => ({ ...state, open: false }));
+        return;
+      default:
+        if (hasUnsavedEntryDraft(modalState) && !window.confirm("這條史料尚未保存，確定放棄修改嗎？")) {
+          return;
+        }
+        setModalState(null);
+    }
+  }
+
   function buildWorkspaceForSave(scope: "active" | "all"): WorkspaceData | null {
     if (scope === "all") {
       return cleanupWorkspace(workspace);
@@ -4847,10 +4972,15 @@ function App() {
       modal.setAttribute("role", "dialog");
       modal.setAttribute("aria-modal", "true");
       modal.tabIndex = -1;
-      const focusable = modal.querySelector<HTMLElement>(
-        'input:not([disabled]), textarea:not([disabled]), select:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      // autoFocus 已聚焦彈窗內欄位時不再搶焦點；沒有輸入欄時聚焦彈窗本身，
+      // 避免焦點落在「刪除」等按鈕上被 Enter 誤觸。
+      if (document.activeElement instanceof Node && modal.contains(document.activeElement)) {
+        return;
+      }
+      const field = modal.querySelector<HTMLElement>(
+        'input:not([disabled]):not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), textarea:not([disabled]), select:not([disabled])',
       );
-      (focusable ?? modal).focus();
+      (field ?? modal).focus();
     });
 
     const trapFocus = (event: KeyboardEvent) => {
@@ -6420,7 +6550,8 @@ function App() {
                 />
               </label>
 
-              <label className="modal-label">
+              {/* 用 div 而非 label：label 會把點擊轉發給內部第一個格式按鈕，插入 `****`。 */}
+              <div className="modal-label">
                 史料文本
                 <div className="format-toolbar">
                   <button
@@ -6468,8 +6599,9 @@ function App() {
                   onKeyUp={syncSourceFormatState}
                   onSelect={syncSourceFormatState}
                   placeholder="輸入原始史料文本..."
+                  aria-label="史料文本"
                 />
-              </label>
+              </div>
 
               <label className="modal-label">
                 備註（支持 #標籤）

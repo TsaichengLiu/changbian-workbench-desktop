@@ -51,6 +51,9 @@ interface WorkspaceBridge {
   onExternalWorkspaceChanged?: (
     handler: (payload: { revision?: number }) => void,
   ) => () => void;
+  onCloseFlushRequest?: (
+    handler: () => Promise<{ saved: boolean; hasUnsavedDraft: boolean }>,
+  ) => () => void;
 }
 
 interface AppearanceBridge {

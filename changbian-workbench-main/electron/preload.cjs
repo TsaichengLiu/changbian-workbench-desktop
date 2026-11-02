@@ -27,6 +27,26 @@ contextBridge.exposeInMainWorld("workspaceBridge", {
     ipcRenderer.on("workspace:external-change", listener);
     return () => ipcRenderer.removeListener("workspace:external-change", listener);
   },
+  onCloseFlushRequest: (handler) => {
+    if (typeof handler !== "function") {
+      return () => {};
+    }
+    const listener = async (_event, requestId) => {
+      let result;
+      try {
+        result = await handler();
+      } catch {
+        result = { saved: false, hasUnsavedDraft: false };
+      }
+      ipcRenderer.send("app:close-flush-done", requestId, result);
+    };
+    ipcRenderer.on("app:close-flush-request", listener);
+    ipcRenderer.send("app:close-flush-ready", true);
+    return () => {
+      ipcRenderer.removeListener("app:close-flush-request", listener);
+      ipcRenderer.send("app:close-flush-ready", false);
+    };
+  },
 });
 
 contextBridge.exposeInMainWorld("appearanceBridge", {

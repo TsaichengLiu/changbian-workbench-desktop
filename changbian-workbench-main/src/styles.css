@@ -688,8 +688,10 @@ select:focus-visible,
 
 .head-actions {
   display: flex;
+  flex-shrink: 0;
   gap: 8px;
   align-items: center;
+  white-space: nowrap;
 }
 
 .entry-list {
@@ -1684,6 +1686,8 @@ select:focus-visible,
 .app-shell[data-theme]:not([data-theme="changbian"]) .entry-view-note,
 .app-shell[data-theme]:not([data-theme="changbian"]) .entry-view-citation,
 .app-shell[data-theme]:not([data-theme="changbian"]) .merge-group-title,
+.app-shell[data-theme]:not([data-theme="changbian"]) .empty-state,
+.app-shell[data-theme]:not([data-theme="changbian"]) .empty-inline,
 .app-shell[data-theme]:not([data-theme="changbian"]) .context-item {
   color: var(--ink-1);
 }
@@ -1700,6 +1704,41 @@ select:focus-visible,
 .app-shell[data-theme]:not([data-theme="changbian"]) .entry-view-source,
 .app-shell[data-theme]:not([data-theme="changbian"]) .path-preview {
   color: var(--ink-0);
+}
+
+/* 深色配色搭「縹緗」卡片：基礎樣式的淺色卡底配上深色主題的淺色文字會看不清，改用半透明深底。
+   須放在下方 hover 規則之前，讓 hover 在同等權重下仍能生效。 */
+.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .project-block,
+.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .chapter-row,
+.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .entry-card,
+.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .search-panel,
+.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .export-panel,
+.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .search-item,
+.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .empty-state,
+.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .empty-inline,
+.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .path-preview,
+.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .status-text {
+  border-color: color-mix(in srgb, var(--accent) 28%, rgb(255 255 255 / 0.14));
+  background: color-mix(in srgb, var(--accent) 12%, rgb(255 255 255 / 0.06));
+}
+
+.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .search-item.selected {
+  border-color: color-mix(in srgb, var(--accent) 68%, transparent);
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* 檢索框與範圍下拉框在任何深色配色下都需要深底，否則白字配淺底。 */
+.app-shell[data-theme]:not([data-theme="changbian"]) .search-input {
+  border-color: color-mix(in srgb, var(--accent) 34%, rgb(255 255 255 / 0.18));
+  background: rgb(0 0 0 / 0.28);
+}
+
+.app-shell[data-theme]:not([data-theme="changbian"]) .search-input:focus {
+  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
+}
+
+.app-shell[data-theme]:not([data-theme="changbian"]) .search-input::placeholder {
+  color: var(--ink-1);
 }
 
 .app-shell[data-theme]:not([data-theme="changbian"]) .primary-btn {
@@ -1928,7 +1967,8 @@ select:focus-visible,
   }
 }
 
-@media (max-width: 1180px) {
+/* 須低於桌面版視窗的 minWidth（1180px），否則視窗縮到最小時會被切成單欄。 */
+@media (max-width: 1120px) {
   .app-shell {
     grid-template-columns: 1fr;
     grid-auto-rows: minmax(280px, auto);
