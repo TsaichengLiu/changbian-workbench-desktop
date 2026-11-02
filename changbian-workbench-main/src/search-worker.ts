@@ -1,9 +1,10 @@
-import { type IndexedEntry, type SearchCriteria, searchInIndex } from "./search-engine";
+import { buildSearchIndex, type IndexedEntry, type SearchCriteria, searchInIndex } from "./search-engine";
+import type { WorkspaceData } from "./types";
 
 type SearchChannel = "global" | "advanced";
 
 type WorkerRequest =
-  | { type: "index"; payload: IndexedEntry[] }
+  | { type: "index"; payload: WorkspaceData }
   | { type: "search"; payload: { requestId: number; channel: SearchChannel; criteria: SearchCriteria } };
 
 type WorkerResponse =
@@ -22,7 +23,7 @@ self.onmessage = (event: MessageEvent<WorkerRequest>) => {
   }
 
   if (data.type === "index") {
-    currentIndex = data.payload;
+    currentIndex = buildSearchIndex(data.payload);
     return;
   }
 

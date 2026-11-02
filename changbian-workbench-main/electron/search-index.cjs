@@ -199,7 +199,7 @@ function resolveEntryContext(workspace, entryId) {
     projectId,
     chapterId: chapterValid ? rawChapterId : "",
     projectTitle: typeof project.title === "string" ? project.title : "",
-    chapterTitle: chapterValid && typeof chapter.title === "string" ? chapter.title : "未分章",
+    chapterTitle: chapterValid && typeof chapter.title === "string" ? chapter.title : "",
     timeText: typeof rawEntry.timeText === "string" ? rawEntry.timeText : "",
     summaryText: typeof rawEntry.summary === "string" ? rawEntry.summary : "",
     sourceText: typeof rawEntry.sourceText === "string" ? rawEntry.sourceText : "",
@@ -741,6 +741,8 @@ class SearchIndexService {
     const rawTag = typeof criteria?.tag === "string" ? criteria.tag : "";
     const normalizedTag = normalizeTagInput(rawTag).toLocaleLowerCase();
     const citationTitle = typeof criteria?.citationTitle === "string" ? criteria.citationTitle.trim() : "";
+    const projectId = typeof criteria?.projectId === "string" ? criteria.projectId.trim() : "";
+    const chapterId = typeof criteria?.chapterId === "string" ? criteria.chapterId.trim() : "";
 
     if (!query && !normalizedTag && !citationTitle) {
       return [];
@@ -752,29 +754,52 @@ class SearchIndexService {
     const whereClauses = [];
     const params = [];
 
+    if (projectId) {
+      whereClauses.push("project_id = ?");
+      params.push(projectId);
+    }
+
+    if (chapterId) {
+      whereClauses.push("chapter_id = ?");
+      params.push(chapterId);
+    }
+
     if (query) {
       const queryVariants = buildVariants(query);
       if (queryVariants.length === 0) {
         return [];
       }
       const scopeColumns = this.buildQueryScopeColumns(criteria?.queryScopes);
+      const canUseFts = queryVariants.every((variant) => [...variant].length >= 3);
 
-      const variantGroups = [];
-      for (const variant of queryVariants) {
-        const columnChecks = [];
-        for (const column of scopeColumns) {
-          columnChecks.push(`${column} LIKE ?`);
-          params.push(`%${variant}%`);
+      if (canUseFts) {
+        const terms = queryVariants.map((variant) => `"${variant.replace(/"/g, '""')}"`);
+        if (terms.length === 0) return [];
+        whereClauses.push("entries_fts MATCH ?");
+        params.push(terms.join(" OR "));
+        if (scopeColumns.length < ALL_SCOPES.length) {
+          const scopedChecks = [];
+          for (const variant of queryVariants) {
+            for (const column of scopeColumns) {
+              scopedChecks.push(`${column} LIKE ?`);
+              params.push(`%${variant}%`);
+            }
+          }
+          if (scopedChecks.length > 0) whereClauses.push(`(${scopedChecks.join(" OR ")})`);
         }
-        if (columnChecks.length > 0) {
-          variantGroups.push(`(${columnChecks.join(" OR ")})`);
+      } else {
+        const variantGroups = [];
+        for (const variant of queryVariants) {
+          const columnChecks = [];
+          for (const column of scopeColumns) {
+            columnChecks.push(`${column} LIKE ?`);
+            params.push(`%${variant}%`);
+          }
+          if (columnChecks.length > 0) variantGroups.push(`(${columnChecks.join(" OR ")})`);
         }
+        if (variantGroups.length === 0) return [];
+        whereClauses.push(`(${variantGroups.join(" OR ")})`);
       }
-
-      if (variantGroups.length === 0) {
-        return [];
-      }
-      whereClauses.push(`(${variantGroups.join(" OR ")})`);
     }
 
     if (normalizedTag) {

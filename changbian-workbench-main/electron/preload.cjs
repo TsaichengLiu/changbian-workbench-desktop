@@ -7,7 +7,8 @@ contextBridge.exposeInMainWorld("desktopMeta", {
 
 contextBridge.exposeInMainWorld("workspaceBridge", {
   loadSharedWorkspace: () => ipcRenderer.invoke("workspace:load-shared"),
-  saveSharedWorkspace: (workspace) => ipcRenderer.invoke("workspace:save-shared", workspace),
+  saveSharedWorkspace: (workspace, expectedRevision) =>
+    ipcRenderer.invoke("workspace:save-shared", workspace, expectedRevision),
   getSharedWorkspacePath: () => ipcRenderer.invoke("workspace:shared-path"),
   getWorkspaceStorageInfo: () => ipcRenderer.invoke("workspace:storage-info"),
   setSharedWorkspacePath: (nextPath, workspace) =>
@@ -15,6 +16,17 @@ contextBridge.exposeInMainWorld("workspaceBridge", {
   resetSharedWorkspacePath: (workspace) =>
     ipcRenderer.invoke("workspace:reset-shared-path", workspace),
   pickSharedWorkspacePath: () => ipcRenderer.invoke("workspace:pick-shared-path"),
+  exportWorkspaceFile: (workspace, suggestedFileName) =>
+    ipcRenderer.invoke("workspace:export-file", workspace, suggestedFileName),
+  importWorkspaceFile: () => ipcRenderer.invoke("workspace:import-file"),
+  onExternalWorkspaceChanged: (handler) => {
+    if (typeof handler !== "function") {
+      return () => {};
+    }
+    const listener = (_event, payload) => handler(payload);
+    ipcRenderer.on("workspace:external-change", listener);
+    return () => ipcRenderer.removeListener("workspace:external-change", listener);
+  },
 });
 
 contextBridge.exposeInMainWorld("appearanceBridge", {

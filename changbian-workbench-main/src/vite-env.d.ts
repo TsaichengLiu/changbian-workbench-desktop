@@ -6,8 +6,22 @@ interface DesktopMeta {
 }
 
 interface WorkspaceBridge {
-  loadSharedWorkspace: () => Promise<unknown>;
-  saveSharedWorkspace: (workspace: unknown) => Promise<boolean>;
+  loadSharedWorkspace: () => Promise<{
+    ok: boolean;
+    workspace?: unknown;
+    revision?: number;
+    error?: string;
+  }>;
+  saveSharedWorkspace: (
+    workspace: unknown,
+    expectedRevision?: number,
+  ) => Promise<{
+    ok: boolean;
+    conflict?: boolean;
+    revision?: number;
+    workspace?: unknown;
+    error?: string;
+  }>;
   getSharedWorkspacePath: () => Promise<string>;
   getWorkspaceStorageInfo: () => Promise<{
     path: string;
@@ -18,11 +32,25 @@ interface WorkspaceBridge {
   setSharedWorkspacePath: (
     nextPath: string,
     workspace?: unknown,
-  ) => Promise<{ ok: boolean; path?: string; error?: string }>;
+  ) => Promise<{ ok: boolean; path?: string; revision?: number; error?: string }>;
   resetSharedWorkspacePath: (
     workspace?: unknown,
-  ) => Promise<{ ok: boolean; path?: string; error?: string }>;
+  ) => Promise<{ ok: boolean; path?: string; revision?: number; error?: string }>;
   pickSharedWorkspacePath: () => Promise<string | null>;
+  exportWorkspaceFile: (
+    workspace: unknown,
+    suggestedFileName?: string,
+  ) => Promise<{ ok: boolean; canceled?: boolean; path?: string; error?: string }>;
+  importWorkspaceFile: () => Promise<{
+    ok: boolean;
+    canceled?: boolean;
+    path?: string;
+    error?: string;
+    data?: unknown;
+  }>;
+  onExternalWorkspaceChanged?: (
+    handler: (payload: { revision?: number }) => void,
+  ) => () => void;
 }
 
 interface AppearanceBridge {
@@ -52,12 +80,14 @@ interface SearchBridgeCriteria {
   queryScopes?: SearchBridgeScope[];
   tag: string;
   citationTitle: string;
+  projectId?: string;
+  chapterId?: string;
   limit?: number;
 }
 
 interface SearchBridgeResult {
   projectId: string;
-  chapterId: string | null;
+  chapterId: string;
   entryId: string;
   projectTitle: string;
   chapterTitle: string;

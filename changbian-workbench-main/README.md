@@ -10,6 +10,7 @@
 - 備註 `#標籤` 解析與標籤過濾檢索
 - 高級檢索彈窗：按關鍵詞 / 標籤 / 引文《》書名檢索，並可將結果導入新專案、新章節、既有專案、既有章節
 - 左欄合併：合併專案、合併章節（章節合併為新章節，來源不刪除）
+- 持久回收站：專案、章節與史料可整批還原，保留最新 100 次刪除操作
 - 全局檢索（繁簡通用，例：`長` 可命中 `长`）
 - 匯出 `txt` / `docx` / `xlsx`
 - MCP Server（供 agent/LLM 錄入史料）
@@ -22,13 +23,20 @@
   - Word: `docx`
   - Excel: `xlsx`
 - 繁簡檢索：`opencc-js`
-- 本地資料儲存：`workspace.json`（主資料）+ `SQLite FTS5`（全文索引）
+- 本地資料儲存：`workspace.json`（帶 schema/revision 的主資料）+ `SQLite FTS5`（全文索引）
+- 安全寫入：原子替換、程序間檔案鎖、revision 衝突偵測、上一版 `.bak`
 
 ## 開發與啟動
 
 ```bash
 npm install
 npm run dev
+```
+
+提交或打包前可執行完整檢查：
+
+```bash
+npm run check
 ```
 
 ## 打包 macOS
@@ -58,6 +66,7 @@ npm run mcp:start
 - 索引檔：與資料檔同目錄、同檔名基底，副檔名為 `.fts5.sqlite`
 - 可用環境變數覆蓋：`CHANGBIAN_MCP_STORE=/your/path/workspace.json`
 - Electron 桌面版會同步同一份共享檔（啟動時讀取、編輯時寫回）
+- MCP 與桌面版同時寫入時會檢查 revision；偵測到外部更新會拒絕舊版本覆蓋
 
 已提供工具：
 - `list_projects`

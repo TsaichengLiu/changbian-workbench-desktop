@@ -7,6 +7,7 @@ import {
   TextRun,
   UnderlineType,
   type IRunOptions,
+  type FileChild,
 } from "docx";
 import * as XLSX from "xlsx";
 import type { Chapter, Entry, OrderedEntryRef, Project, WorkspaceData } from "./types";
@@ -29,18 +30,11 @@ function collectEntriesForProject(workspace: WorkspaceData, project: Project): O
   let counter = 1;
   const collected: OrderedEntryRef[] = [];
 
-  const collectEntry = (entry: Entry, chapterId: string | null) => {
-    const chapter = chapterId ? workspace.chapters[chapterId] ?? null : null;
+  const collectEntry = (entry: Entry, chapterId: string) => {
+    const chapter = workspace.chapters[chapterId] ?? null;
     collected.push({ entry, project, chapter, order: counter });
     counter += 1;
   };
-
-  for (const entryId of project.entryIds) {
-    const entry = workspace.entries[entryId];
-    if (entry) {
-      collectEntry(entry, null);
-    }
-  }
 
   for (const chapterId of project.chapterIds) {
     const chapter = workspace.chapters[chapterId];
@@ -195,26 +189,6 @@ export function exportAsTxt(workspace: WorkspaceData, scope: ExportScope): void 
   for (const project of projects) {
     lines.push(`# 專案：${project.title}`);
 
-    const directEntries = project.entryIds
-      .map((entryId) => workspace.entries[entryId])
-      .filter((entry): entry is Entry => Boolean(entry));
-
-    if (directEntries.length > 0) {
-      lines.push("## 未分章史料");
-      directEntries.forEach((entry, index) => {
-        lines.push(`### ${index + 1}. ${entryHeadline(entry)}`);
-        lines.push("摘要：");
-        lines.push(entry.summary || "");
-        lines.push("史料文本：");
-        lines.push(entry.sourceText || "");
-        lines.push("備註：");
-        lines.push(entry.note || "");
-        lines.push("引文註釋：");
-        lines.push(entry.citation || "");
-        lines.push("");
-      });
-    }
-
     for (const chapterId of project.chapterIds) {
       const chapter = workspace.chapters[chapterId];
       if (!chapter) {
@@ -247,7 +221,7 @@ export function exportAsTxt(workspace: WorkspaceData, scope: ExportScope): void 
   downloadBlob(new Blob([content], { type: "text/plain;charset=utf-8" }), `${filename}.txt`);
 }
 
-function appendEntryParagraphs(children: Paragraph[], order: number, entry: Entry): void {
+function appendEntryParagraphs(children: FileChild[], order: number, entry: Entry): void {
   const sharedIndent = DOCX_INDENT.entry;
   const summaryLabel = entry.summary.trim() || "（無摘要）";
 
@@ -299,7 +273,7 @@ function appendEntryParagraphs(children: Paragraph[], order: number, entry: Entr
 
 export async function exportAsDocx(workspace: WorkspaceData, scope: ExportScope): Promise<void> {
   const projects = getExportProjects(workspace, scope);
-  const children: Paragraph[] = [
+  const children: FileChild[] = [
     new Paragraph({
       text: "長編工作臺匯出",
       heading: HeadingLevel.TITLE,
@@ -327,10 +301,6 @@ export async function exportAsDocx(workspace: WorkspaceData, scope: ExportScope)
 
     let order = 1;
 
-    const directEntries = project.entryIds
-      .map((entryId) => workspace.entries[entryId])
-      .filter((entry): entry is Entry => Boolean(entry));
-
     const chapterEntries = project.chapterIds
       .map((chapterId) => workspace.chapters[chapterId])
       .filter((chapter): chapter is Chapter => Boolean(chapter))
@@ -342,7 +312,7 @@ export async function exportAsDocx(workspace: WorkspaceData, scope: ExportScope)
       }))
       .filter((group) => group.entries.length > 0);
 
-    if (directEntries.length === 0 && chapterEntries.length === 0) {
+    if (chapterEntries.length === 0) {
       children.push(
         new Paragraph({
           text: "（此專案暫無史料）",
@@ -350,21 +320,6 @@ export async function exportAsDocx(workspace: WorkspaceData, scope: ExportScope)
         }),
       );
       continue;
-    }
-
-    if (directEntries.length > 0) {
-      children.push(
-        new Paragraph({
-          text: "未分章史料",
-          heading: HeadingLevel.HEADING_2,
-          indent: { left: DOCX_INDENT.chapter },
-          spacing: { line: DOCX_LINE_SPACING },
-        }),
-      );
-      for (const entry of directEntries) {
-        appendEntryParagraphs(children, order, entry);
-        order += 1;
-      }
     }
 
     for (const group of chapterEntries) {
@@ -471,7 +426,7 @@ export function exportAsXlsx(workspace: WorkspaceData, scope: ExportScope): void
     for (const item of entries) {
       rows.push([
         project.title,
-        item.chapter?.title ?? "未分章",
+        item.chapter?.title ?? "",
         item.order,
         item.entry.timeText,
         item.entry.summary,

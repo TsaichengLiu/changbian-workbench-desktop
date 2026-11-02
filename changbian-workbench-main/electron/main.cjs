@@ -3,6 +3,7 @@ const fs = require("fs");
 const os = require("os");
 const { app, BrowserWindow, Menu, dialog, ipcMain } = require("electron");
 const { SearchIndexService } = require("./search-index.cjs");
+const { readWorkspaceFile, validateWorkspace, writeWorkspaceFile } = require("./workspace-store.cjs");
 
 const isDev = !app.isPackaged;
 const DEFAULT_SHARED_WORKSPACE_FILE = path.join(os.homedir(), ".changbian-workbench", "workspace.json");
@@ -99,6 +100,9 @@ function resolveSharedWorkspaceFile() {
 
 let sharedWorkspaceFile = resolveSharedWorkspaceFile();
 let currentAppearance = loadAppearanceFromSettings();
+let workspaceWatcher = null;
+let workspaceWatchTimer = null;
+let lastInternalWorkspaceRevision = 0;
 const searchIndexService = new SearchIndexService({
   getWorkspaceFilePath: () => sharedWorkspaceFile,
 });
@@ -143,26 +147,58 @@ function getStorageInfo() {
 }
 
 function loadSharedWorkspace() {
-  try {
-    if (!fs.existsSync(sharedWorkspaceFile)) {
-      return null;
+  return readWorkspaceFile(sharedWorkspaceFile);
+}
+
+function saveSharedWorkspace(workspace, expectedRevision) {
+  const result = writeWorkspaceFile(sharedWorkspaceFile, workspace, { expectedRevision });
+  if (!result.ok) {
+    return result;
+  }
+  lastInternalWorkspaceRevision = result.revision;
+  searchIndexService.syncWorkspace(result.workspace);
+  return result;
+}
+
+function broadcastExternalWorkspaceChange(revision) {
+  for (const win of BrowserWindow.getAllWindows()) {
+    if (!win.isDestroyed()) {
+      win.webContents.send("workspace:external-change", { revision });
     }
-    const raw = fs.readFileSync(sharedWorkspaceFile, "utf8");
-    return JSON.parse(raw);
-  } catch {
-    return null;
   }
 }
 
-function saveSharedWorkspace(workspace) {
-  const saved = writeJsonAtomic(sharedWorkspaceFile, workspace);
-  if (!saved) {
-    return false;
+function stopWorkspaceWatcher() {
+  if (workspaceWatchTimer) {
+    clearTimeout(workspaceWatchTimer);
+    workspaceWatchTimer = null;
   }
-  if (workspace && typeof workspace === "object") {
-    searchIndexService.syncWorkspace(workspace);
+  if (workspaceWatcher) {
+    try { workspaceWatcher.close(); } catch {}
+    workspaceWatcher = null;
   }
-  return true;
+}
+
+function startWorkspaceWatcher() {
+  stopWorkspaceWatcher();
+  const directory = path.dirname(sharedWorkspaceFile);
+  const targetName = path.basename(sharedWorkspaceFile);
+  fs.mkdirSync(directory, { recursive: true });
+  try {
+    workspaceWatcher = fs.watch(directory, (_eventType, filename) => {
+      if (filename && String(filename) !== targetName) return;
+      if (workspaceWatchTimer) clearTimeout(workspaceWatchTimer);
+      workspaceWatchTimer = setTimeout(() => {
+        workspaceWatchTimer = null;
+        const result = readWorkspaceFile(sharedWorkspaceFile);
+        if (!result.ok || !result.workspace || result.revision === lastInternalWorkspaceRevision) return;
+        lastInternalWorkspaceRevision = result.revision;
+        broadcastExternalWorkspaceChange(result.revision);
+      }, 160);
+    });
+  } catch {
+    workspaceWatcher = null;
+  }
 }
 
 function setSharedWorkspacePath(nextPath, workspace) {
@@ -179,22 +215,30 @@ function setSharedWorkspacePath(nextPath, workspace) {
   }
 
   const normalizedPath = path.resolve(candidate);
+  let revision = 0;
+  if (workspace && typeof workspace === "object") {
+    const currentTarget = readWorkspaceFile(normalizedPath);
+    const saved = writeWorkspaceFile(normalizedPath, workspace, {
+      expectedRevision: currentTarget.ok ? currentTarget.revision : undefined,
+    });
+    if (!saved.ok) {
+      return { ok: false, error: `未切換路徑，目標檔寫入失敗：${saved.error || "未知錯誤"}` };
+    }
+    revision = saved.revision;
+  }
+
   const settings = loadSettings();
   settings.workspacePath = normalizedPath;
   if (!saveSettings(settings)) {
-    return { ok: false, error: "無法保存路徑設定。" };
+    return { ok: false, error: "資料已寫入目標檔，但無法保存路徑設定；目前路徑未切換。" };
   }
 
   sharedWorkspaceFile = normalizedPath;
+  lastInternalWorkspaceRevision = revision;
   searchIndexService.close();
-  if (workspace && typeof workspace === "object") {
-    const saved = saveSharedWorkspace(workspace);
-    if (!saved) {
-      return { ok: false, error: "路徑切換成功，但寫入資料失敗。" };
-    }
-  }
-
-  return { ok: true, path: sharedWorkspaceFile };
+  if (workspace && typeof workspace === "object") searchIndexService.syncWorkspace(workspace);
+  startWorkspaceWatcher();
+  return { ok: true, path: sharedWorkspaceFile, revision };
 }
 
 function resetSharedWorkspacePath(workspace) {
@@ -205,22 +249,38 @@ function resetSharedWorkspacePath(workspace) {
     };
   }
 
+  let revision = 0;
+  if (workspace && typeof workspace === "object") {
+    const currentTarget = readWorkspaceFile(DEFAULT_SHARED_WORKSPACE_FILE);
+    const saved = writeWorkspaceFile(DEFAULT_SHARED_WORKSPACE_FILE, workspace, {
+      expectedRevision: currentTarget.ok ? currentTarget.revision : undefined,
+    });
+    if (!saved.ok) {
+      return { ok: false, error: `未重設路徑，預設檔寫入失敗：${saved.error || "未知錯誤"}` };
+    }
+    revision = saved.revision;
+  }
+
   const settings = loadSettings();
   delete settings.workspacePath;
   if (!saveSettings(settings)) {
-    return { ok: false, error: "無法重設路徑設定。" };
+    return { ok: false, error: "資料已寫入預設檔，但無法更新路徑設定；目前路徑未切換。" };
   }
 
   sharedWorkspaceFile = DEFAULT_SHARED_WORKSPACE_FILE;
+  lastInternalWorkspaceRevision = revision;
   searchIndexService.close();
-  if (workspace && typeof workspace === "object") {
-    const saved = saveSharedWorkspace(workspace);
-    if (!saved) {
-      return { ok: false, error: "路徑重設成功，但寫入資料失敗。" };
-    }
-  }
+  if (workspace && typeof workspace === "object") searchIndexService.syncWorkspace(workspace);
+  startWorkspaceWatcher();
+  return { ok: true, path: sharedWorkspaceFile, revision };
+}
 
-  return { ok: true, path: sharedWorkspaceFile };
+function ensureJsonExtension(filePath) {
+  const normalized = typeof filePath === "string" ? filePath.trim() : "";
+  if (!normalized) {
+    return "";
+  }
+  return normalized.toLocaleLowerCase().endsWith(".json") ? normalized : `${normalized}.json`;
 }
 
 function buildAppearanceSubmenu() {
@@ -281,7 +341,9 @@ function setApplicationMenu() {
 }
 
 ipcMain.handle("workspace:load-shared", () => loadSharedWorkspace());
-ipcMain.handle("workspace:save-shared", (_event, workspace) => saveSharedWorkspace(workspace));
+ipcMain.handle("workspace:save-shared", (_event, workspace, expectedRevision) =>
+  saveSharedWorkspace(workspace, expectedRevision),
+);
 ipcMain.handle("workspace:shared-path", () => sharedWorkspaceFile);
 ipcMain.handle("workspace:storage-info", () => getStorageInfo());
 ipcMain.handle("workspace:set-shared-path", (_event, nextPath, workspace) =>
@@ -312,6 +374,78 @@ ipcMain.handle("workspace:pick-shared-path", async () => {
   return result.filePath || null;
 });
 
+ipcMain.handle("workspace:export-file", async (_event, workspace, suggestedFileName) => {
+  const focused = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0] || undefined;
+  const baseName =
+    typeof suggestedFileName === "string" && suggestedFileName.trim()
+      ? suggestedFileName.trim()
+      : path.basename(sharedWorkspaceFile) || "workspace.json";
+  const defaultPath = path.join(path.dirname(sharedWorkspaceFile), ensureJsonExtension(baseName));
+  const result = await dialog.showSaveDialog(focused, {
+    title: "備份工作臺檔案",
+    defaultPath,
+    buttonLabel: "備份到",
+    filters: [{ name: "JSON", extensions: ["json"] }],
+    properties: ["createDirectory", "showOverwriteConfirmation"],
+  });
+
+  if (result.canceled || !result.filePath) {
+    return { ok: false, canceled: true };
+  }
+
+  const filePath = ensureJsonExtension(result.filePath);
+  if (fs.existsSync(filePath)) {
+    const confirm = await dialog.showMessageBox(focused, {
+      type: "warning",
+      title: "確認覆蓋備份檔",
+      message: `檔案已存在：\n${filePath}\n\n是否要覆蓋這個備份檔？`,
+      buttons: ["取消", "覆蓋備份檔"],
+      defaultId: 0,
+      cancelId: 0,
+      noLink: true,
+    });
+    if (confirm.response !== 1) {
+      return { ok: false, canceled: true };
+    }
+  }
+  const validation = validateWorkspace(workspace);
+  if (!validation.ok) {
+    return { ok: false, error: `拒絕備份無效資料：${validation.errors.slice(0, 4).join("；")}` };
+  }
+  const saved = writeJsonAtomic(filePath, validation.workspace);
+  if (!saved) {
+    return { ok: false, error: "無法寫入檔案。" };
+  }
+  return { ok: true, path: filePath };
+});
+
+ipcMain.handle("workspace:import-file", async () => {
+  const focused = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0] || undefined;
+  const result = await dialog.showOpenDialog(focused, {
+    title: "匯入工作臺檔案",
+    defaultPath: path.dirname(sharedWorkspaceFile),
+    filters: [{ name: "JSON", extensions: ["json"] }],
+    properties: ["openFile"],
+  });
+
+  if (result.canceled || result.filePaths.length === 0) {
+    return { ok: false, canceled: true };
+  }
+
+  const filePath = result.filePaths[0];
+  try {
+    const raw = fs.readFileSync(filePath, "utf8");
+    const data = JSON.parse(raw);
+    const validation = validateWorkspace(data);
+    if (!validation.ok) {
+      return { ok: false, error: `檔案格式不正確：${validation.errors.slice(0, 4).join("；")}` };
+    }
+    return { ok: true, path: filePath, data: validation.workspace };
+  } catch {
+    return { ok: false, error: "檔案讀取或解析失敗，請確認為有效 JSON。" };
+  }
+});
+
 function createWindow() {
   const mainWindow = new BrowserWindow({
     width: 1600,
@@ -324,6 +458,7 @@ function createWindow() {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
+      sandbox: true,
       spellcheck: false,
     },
   });
@@ -343,10 +478,12 @@ function createWindow() {
 
 app.whenReady().then(() => {
   setApplicationMenu();
-  const workspace = loadSharedWorkspace();
-  if (workspace && typeof workspace === "object") {
-    searchIndexService.syncWorkspace(workspace);
+  const loaded = loadSharedWorkspace();
+  if (loaded.ok && loaded.workspace) {
+    lastInternalWorkspaceRevision = loaded.revision;
+    searchIndexService.syncWorkspace(loaded.workspace);
   }
+  startWorkspaceWatcher();
   createWindow();
 
   app.on("activate", () => {
@@ -363,5 +500,6 @@ app.on("window-all-closed", () => {
 });
 
 app.on("before-quit", () => {
+  stopWorkspaceWatcher();
   searchIndexService.close();
 });

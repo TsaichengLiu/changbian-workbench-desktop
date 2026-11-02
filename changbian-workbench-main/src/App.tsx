@@ -11,20 +11,16 @@ import {
   useState,
   useTransition,
 } from "react";
-import { ExportScope, exportAsDocx, exportAsTxt, exportAsXlsx } from "./exporters";
-import { buildVariants, matchesTraditionalSimplified } from "./search";
-import {
-  buildSearchIndex,
-  type IndexedEntry,
-  type SearchCriteria,
-  type SearchResult,
-  searchInIndex,
-} from "./search-engine";
-import type { Entry, WorkspaceData } from "./types";
+import type { ExportScope } from "./exporters";
+import type { SearchCriteria, SearchResult } from "./search-engine";
+import type { Chapter, Entry, Project, TrashItem, WorkspaceData } from "./types";
 import { createId, reorderById, summarize } from "./utils";
 
 const STORAGE_KEY = "longform_history_workbench_v3";
 const APPEARANCE_KEY = "longform_history_workbench_appearance_v1";
+const WORKSPACE_SCHEMA_VERSION = 1;
+const WORKSPACE_SAVE_DEBOUNCE_MS = 450;
+const TRASH_ITEM_LIMIT = 100;
 
 type UiThemeId = "changbian" | "obsidian" | "ocean" | "graphite" | "dusk" | "vaporwave";
 type UiCardStyleId = "changbian" | "outline" | "frosted";
@@ -191,12 +187,11 @@ function appearanceVars(appearance: AppearanceState): CSSProperties {
 }
 
 const TAG_REGEX = /#([^\s#，。；、,.;:!?！？【】（）()<>《》]+)/g;
-const CITATION_TITLE_REGEX = /《([^》\n\r]+)》/g;
 
 type DragPayload =
   | { type: "project"; id: string }
   | { type: "chapter"; id: string; projectId: string }
-  | { type: "entry"; id: string; projectId: string; chapterId: string | null };
+  | { type: "entry"; id: string; projectId: string; chapterId: string };
 
 interface EntryDraft {
   timeText: string;
@@ -208,7 +203,6 @@ interface EntryDraft {
 
 interface ProjectSnapshot {
   title: string;
-  directEntries: EntryDraft[];
   chapters: Array<{
     title: string;
     entries: EntryDraft[];
@@ -226,6 +220,16 @@ type ClipboardState =
   | { kind: "entry"; drafts: EntryDraft[] }
   | null;
 
+type SaveState = "saved" | "pending" | "saving" | "local" | "error";
+
+const SAVE_STATE_LABEL: Record<SaveState, string> = {
+  saved: "已儲存",
+  pending: "尚未儲存",
+  saving: "儲存中…",
+  local: "已備份於本機",
+  error: "儲存失敗",
+};
+
 type ModalState =
   | { kind: "project-create"; value: string; insertAfterProjectId: string | null }
   | { kind: "project-rename"; projectId: string; value: string }
@@ -241,7 +245,7 @@ type ModalState =
   | {
       kind: "entry-create";
       projectId: string;
-      chapterId: string | null;
+      chapterId: string;
       insertAfterEntryId: string | null;
       draft: EntryDraft;
     }
@@ -271,6 +275,61 @@ interface EntryMenuState {
 
 type ContextMenuState = ProjectMenuState | ChapterMenuState | EntryMenuState;
 
+interface ModalDragState {
+  key: string;
+  startX: number;
+  startY: number;
+  originX: number;
+  originY: number;
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+}
+
+type OverlayModalKey =
+  | "storage"
+  | "trash"
+  | "storage-save-as"
+  | "storage-format-info"
+  | "form"
+  | "entry-view"
+  | "entry-form"
+  | "advanced"
+  | "merge-project"
+  | "merge-chapter";
+
+const OVERLAY_MODAL_KEYS: OverlayModalKey[] = [
+  "storage",
+  "trash",
+  "storage-save-as",
+  "storage-format-info",
+  "form",
+  "entry-view",
+  "entry-form",
+  "advanced",
+  "merge-project",
+  "merge-chapter",
+];
+
+const MODAL_BASE_Z_INDEX = 130;
+const MODAL_Z_INDEX_STEP = 4;
+
+function createOverlayModalMap<T>(value: T): Record<OverlayModalKey, T> {
+  return {
+    storage: value,
+    trash: value,
+    "storage-save-as": value,
+    "storage-format-info": value,
+    form: value,
+    "entry-view": value,
+    "entry-form": value,
+    advanced: value,
+    "merge-project": value,
+    "merge-chapter": value,
+  };
+}
+
 interface MergeModalState {
   open: boolean;
   mode: "into-active" | "as-new";
@@ -281,7 +340,6 @@ interface MergeModalState {
 type AdvancedTargetMode =
   | "new-project"
   | "new-chapter"
-  | "existing-project"
   | "existing-chapter";
 
 type AdvancedQueryScope =
@@ -294,13 +352,13 @@ type AdvancedQueryScope =
   | "citation";
 
 const ADVANCED_QUERY_SCOPE_OPTIONS: Array<{ value: AdvancedQueryScope; label: string }> = [
-  { value: "project", label: "專案名稱" },
-  { value: "chapter", label: "章節名稱" },
+  { value: "project", label: "專案" },
+  { value: "chapter", label: "章節" },
   { value: "time", label: "時間" },
   { value: "summary", label: "摘要" },
-  { value: "source", label: "史料文本" },
+  { value: "source", label: "史料" },
   { value: "note", label: "備註" },
-  { value: "citation", label: "引文註釋" },
+  { value: "citation", label: "引文" },
 ];
 
 const DEFAULT_ADVANCED_QUERY_SCOPES: AdvancedQueryScope[] = ADVANCED_QUERY_SCOPE_OPTIONS.map(
@@ -325,13 +383,6 @@ interface ChapterMergeModalState {
   selectedChapterIds: string[];
   targetProjectId: string;
   newChapterTitle: string;
-}
-
-interface EntryFilterCriteria {
-  query: string;
-  queryScopes?: AdvancedQueryScope[];
-  tag: string;
-  citationTitle: string;
 }
 
 interface WorkspaceStorageInfo {
@@ -379,20 +430,6 @@ function extractTags(text: string): string[] {
   return tags;
 }
 
-function extractCitationTitles(text: string): string[] {
-  const tokens: string[] = [];
-  const seen = new Set<string>();
-  for (const match of text.matchAll(CITATION_TITLE_REGEX)) {
-    const title = (match[1] ?? "").trim();
-    if (!title || seen.has(title)) {
-      continue;
-    }
-    seen.add(title);
-    tokens.push(title);
-  }
-  return tokens;
-}
-
 function firstEntryInProject(workspace: WorkspaceData, projectId: string | null): string | null {
   if (!projectId) {
     return null;
@@ -401,10 +438,6 @@ function firstEntryInProject(workspace: WorkspaceData, projectId: string | null)
   const project = workspace.projects[projectId];
   if (!project) {
     return null;
-  }
-
-  if (project.entryIds.length > 0) {
-    return project.entryIds[0] ?? null;
   }
 
   for (const chapterId of project.chapterIds) {
@@ -433,13 +466,31 @@ function activeEntryIds(workspace: WorkspaceData): string[] {
     return chapter?.entryIds ?? [];
   }
 
-  return project.entryIds;
+  return [];
+}
+
+function ensureRepairChapterId(workspace: WorkspaceData, projectId: string): string {
+  const chapterId = `chapter-ungrouped-${projectId}`;
+  if (!workspace.chapters[chapterId]) {
+    workspace.chapters[chapterId] = {
+      id: chapterId,
+      projectId,
+      title: "未分章",
+      entryIds: [],
+      createdAt: Date.now(),
+    };
+  }
+  const project = workspace.projects[projectId];
+  if (project && !project.chapterIds.includes(chapterId)) {
+    project.chapterIds.push(chapterId);
+  }
+  return chapterId;
 }
 
 function resolveInsertAfterEntryId(
   workspace: WorkspaceData,
   projectId: string,
-  chapterId: string | null,
+  chapterId: string,
   selectedEntryId: string | null,
 ): string | null {
   if (!selectedEntryId) {
@@ -452,7 +503,7 @@ function resolveInsertAfterEntryId(
   if (selected.projectId !== projectId) {
     return null;
   }
-  if ((selected.chapterId ?? null) !== (chapterId ?? null)) {
+  if (selected.chapterId !== chapterId) {
     return null;
   }
   return selectedEntryId;
@@ -472,7 +523,7 @@ function buildIdRange(orderedIds: string[], anchorId: string, targetId: string):
 function appendEntryDraft(
   workspace: WorkspaceData,
   projectId: string,
-  chapterId: string | null,
+  chapterId: string,
   draft: EntryDraft,
   insertAfterEntryId: string | null = null,
 ): string {
@@ -490,9 +541,7 @@ function appendEntryDraft(
     updatedAt: Date.now(),
   };
 
-  const targetEntryIds = chapterId
-    ? workspace.chapters[chapterId]?.entryIds
-    : workspace.projects[projectId]?.entryIds;
+  const targetEntryIds = workspace.chapters[chapterId]?.entryIds;
 
   if (!targetEntryIds) {
     return entryId;
@@ -595,11 +644,6 @@ function collectProjectSnapshot(workspace: WorkspaceData, projectId: string): Pr
     return null;
   }
 
-  const directEntries = project.entryIds
-    .map((entryId) => workspace.entries[entryId])
-    .filter((entry): entry is Entry => Boolean(entry))
-    .map(entryToDraft);
-
   const chapters = project.chapterIds
     .map((chapterId) => workspace.chapters[chapterId])
     .filter(Boolean)
@@ -613,7 +657,6 @@ function collectProjectSnapshot(workspace: WorkspaceData, projectId: string): Pr
 
   return {
     title: project.title,
-    directEntries,
     chapters,
   };
 }
@@ -645,17 +688,6 @@ function appendSnapshotToProject(
 
   let firstEntryId: string | null = null;
 
-  if (snapshot.directEntries.length > 0) {
-    const title = prefixSourceTitle ? `${snapshot.title}｜未分章` : "未分章";
-    const chapterId = appendChapterWithEntries(workspace, targetProjectId, title, snapshot.directEntries);
-    if (chapterId) {
-      const first = workspace.chapters[chapterId]?.entryIds[0] ?? null;
-      if (!firstEntryId && first) {
-        firstEntryId = first;
-      }
-    }
-  }
-
   for (const chapter of snapshot.chapters) {
     if (chapter.entries.length === 0) {
       continue;
@@ -674,8 +706,47 @@ function appendSnapshotToProject(
   return firstEntryId;
 }
 
+function isTrashItem(value: unknown): value is TrashItem {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const item = value as Partial<TrashItem> & { payload?: unknown };
+  if (
+    typeof item.id !== "string" ||
+    typeof item.deletedAt !== "number" ||
+    typeof item.label !== "string" ||
+    !item.payload ||
+    typeof item.payload !== "object"
+  ) {
+    return false;
+  }
+  const payload = item.payload as unknown as Record<string, unknown>;
+  if (payload.kind === "project") {
+    return Boolean(
+      payload.project &&
+      typeof payload.project === "object" &&
+      Array.isArray(payload.chapters) &&
+      Array.isArray(payload.entries),
+    );
+  }
+  if (payload.kind === "chapter") {
+    return Array.isArray(payload.chapters) && Array.isArray(payload.entries);
+  }
+  return payload.kind === "entry" && Array.isArray(payload.entries);
+}
+
+function prependTrashItem(workspace: WorkspaceData, item: TrashItem): void {
+  workspace.trash = [item, ...workspace.trash].slice(0, TRASH_ITEM_LIMIT);
+}
+
 function cleanupWorkspace(workspace: WorkspaceData): WorkspaceData {
   const next = structuredClone(workspace);
+  next.schemaVersion = WORKSPACE_SCHEMA_VERSION;
+  next.revision = Number.isInteger(next.revision) && next.revision >= 0 ? next.revision : 0;
+  next.trash = (Array.isArray(next.trash) ? next.trash : [])
+    .filter(isTrashItem)
+    .sort((a, b) => b.deletedAt - a.deletedAt)
+    .slice(0, TRASH_ITEM_LIMIT);
 
   next.projectOrder = next.projectOrder.filter((projectId) => Boolean(next.projects[projectId]));
 
@@ -697,11 +768,10 @@ function cleanupWorkspace(workspace: WorkspaceData): WorkspaceData {
       continue;
     }
 
-    if (entry.chapterId && !next.chapters[entry.chapterId]) {
-      entry.chapterId = null;
-      if (!project.entryIds.includes(entry.id)) {
-        project.entryIds.push(entry.id);
-      }
+    // 章節已不存在時，遷入該專案的「未分章」修復章節（與 workspace-store 的遷移規則一致），
+    // 史料不再允許脫離章節存在。
+    if (!entry.chapterId || !next.chapters[entry.chapterId]) {
+      entry.chapterId = ensureRepairChapterId(next, project.id);
     }
   }
 
@@ -717,22 +787,6 @@ function cleanupWorkspace(workspace: WorkspaceData): WorkspaceData {
       .sort((a, b) => a.createdAt - b.createdAt)
       .map((chapter) => chapter.id);
     project.chapterIds.push(...missingChapters);
-
-    project.entryIds = project.entryIds.filter((entryId) => {
-      const entry = next.entries[entryId];
-      return Boolean(entry && entry.projectId === project.id && entry.chapterId === null);
-    });
-
-    const missingProjectEntries = Object.values(next.entries)
-      .filter(
-        (entry) =>
-          entry.projectId === project.id &&
-          entry.chapterId === null &&
-          !project.entryIds.includes(entry.id),
-      )
-      .sort((a, b) => a.createdAt - b.createdAt)
-      .map((entry) => entry.id);
-    project.entryIds.push(...missingProjectEntries);
   }
 
   for (const chapterId of Object.keys(next.chapters)) {
@@ -760,7 +814,6 @@ function cleanupWorkspace(workspace: WorkspaceData): WorkspaceData {
       id: projectId,
       title: "新建專案",
       chapterIds: [],
-      entryIds: [],
       createdAt: Date.now(),
     };
     next.projectOrder.push(projectId);
@@ -797,22 +850,34 @@ function cleanupWorkspace(workspace: WorkspaceData): WorkspaceData {
 function createInitialWorkspace(): WorkspaceData {
   const projectId = createId("project");
   return {
+    schemaVersion: WORKSPACE_SCHEMA_VERSION,
+    revision: 0,
     projectOrder: [projectId],
     projects: {
       [projectId]: {
         id: projectId,
         title: "我的長編專案",
         chapterIds: [],
-        entryIds: [],
         createdAt: Date.now(),
       },
     },
     chapters: {},
     entries: {},
+    trash: [],
     activeProjectId: projectId,
     activeChapterId: null,
     selectedEntryId: null,
   };
+}
+
+function workspaceContentSignature(workspace: WorkspaceData): string {
+  return JSON.stringify({
+    projectOrder: workspace.projectOrder,
+    projects: workspace.projects,
+    chapters: workspace.chapters,
+    entries: workspace.entries,
+    trash: workspace.trash,
+  });
 }
 
 function loadWorkspace(): WorkspaceData {
@@ -829,70 +894,57 @@ function loadWorkspace(): WorkspaceData {
   }
 }
 
-function iterateAllEntries(workspace: WorkspaceData): SearchResult[] {
-  const output: SearchResult[] = [];
-
-  for (const projectId of workspace.projectOrder) {
-    const project = workspace.projects[projectId];
-    if (!project) {
-      continue;
-    }
-
-    for (const entryId of project.entryIds) {
-      const entry = workspace.entries[entryId];
-      if (!entry) {
-        continue;
-      }
-      output.push({
-        projectId: project.id,
-        chapterId: null,
-        entryId: entry.id,
-        projectTitle: project.title,
-        chapterTitle: "未分章",
-        timeText: entry.timeText,
-        summaryText: entry.summary,
-        snippet: summarize(entry.sourceText, 120),
-        citation: summarize(entry.citation, 80),
-        tags: extractTags(entry.note),
-      });
-    }
-
-    for (const chapterId of project.chapterIds) {
-      const chapter = workspace.chapters[chapterId];
-      if (!chapter) {
-        continue;
-      }
-
-      for (const entryId of chapter.entryIds) {
-        const entry = workspace.entries[entryId];
-        if (!entry) {
-          continue;
-        }
-        output.push({
-          projectId: project.id,
-          chapterId: chapter.id,
-          entryId: entry.id,
-          projectTitle: project.title,
-          chapterTitle: chapter.title,
-          timeText: entry.timeText,
-          summaryText: entry.summary,
-          snippet: summarize(entry.sourceText, 120),
-          citation: summarize(entry.citation, 80),
-          tags: extractTags(entry.note),
-        });
-      }
-    }
-  }
-
-  return output;
-}
-
 function normalizeTagInput(tag: string): string {
   const trimmed = tag.trim();
   if (!trimmed) {
     return "";
   }
   return trimmed.startsWith("#") ? trimmed : `#${trimmed}`;
+}
+
+interface SourceFormatState {
+  bold: boolean;
+  italic: boolean;
+  underline: boolean;
+}
+
+const EMPTY_SOURCE_FORMAT_STATE: SourceFormatState = {
+  bold: false,
+  italic: false,
+  underline: false,
+};
+
+function selectionIsInsideMarker(value: string, start: number, end: number, token: string): boolean {
+  let openingIndex = -1;
+  for (let index = 0; index <= value.length - token.length; index += 1) {
+    if (value.slice(index, index + token.length) !== token) {
+      continue;
+    }
+    if (token === "*" && (value[index - 1] === "*" || value[index + 1] === "*")) {
+      continue;
+    }
+    if (openingIndex < 0) {
+      openingIndex = index;
+      index += token.length - 1;
+      continue;
+    }
+    const contentStart = openingIndex + token.length;
+    if (start >= contentStart && end <= index) {
+      return true;
+    }
+    openingIndex = -1;
+    index += token.length - 1;
+  }
+  return false;
+}
+
+function resolveSourceFormatState(textarea: HTMLTextAreaElement): SourceFormatState {
+  const { value, selectionStart, selectionEnd } = textarea;
+  return {
+    bold: selectionIsInsideMarker(value, selectionStart, selectionEnd, "**"),
+    italic: selectionIsInsideMarker(value, selectionStart, selectionEnd, "*"),
+    underline: selectionIsInsideMarker(value, selectionStart, selectionEnd, "__"),
+  };
 }
 
 function formatEntryHeadline(timeText: string, summaryText: string): string {
@@ -912,6 +964,14 @@ function formatDateTimeLabel(timestamp: number): string {
   return date.toLocaleString("zh-Hant-TW", { hour12: false });
 }
 
+function sanitizeFileNameSegment(value: string): string {
+  return value
+    .trim()
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "_")
+    .replace(/\s+/g, " ")
+    .slice(0, 80);
+}
+
 function escapeHtml(text: string): string {
   return text
     .replace(/&/g, "&amp;")
@@ -921,14 +981,6 @@ function escapeHtml(text: string): string {
     .replace(/'/g, "&#39;");
 }
 
-function renderLightMarkup(text: string): string {
-  let html = escapeHtml(text);
-  html = html.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
-  html = html.replace(/__([^_\n]+)__/g, "<u>$1</u>");
-  html = html.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
-  return html.replace(/\r?\n/g, "<br />");
-}
-
 function escapeRegexToken(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -936,8 +988,9 @@ function escapeRegexToken(value: string): string {
 function buildHighlightTokens(query: string): string[] {
   return Array.from(
     new Set(
-      buildVariants(query)
-        .flatMap((variant) => variant.split(/\s+/))
+      query
+        .toLocaleLowerCase()
+        .split(/\s+/)
         .map((token) => token.trim())
         .filter(Boolean),
     ),
@@ -1032,62 +1085,6 @@ function renderHighlightedLightMarkup(text: string, query: string): string {
   return html.replace(/\r?\n/g, "<br />");
 }
 
-function filterEntriesByCriteria(workspace: WorkspaceData, criteria: EntryFilterCriteria): SearchResult[] {
-  const query = criteria.query.trim();
-  const queryScopes = criteria.queryScopes ?? DEFAULT_ADVANCED_QUERY_SCOPES;
-  const normalizedTag = normalizeTagInput(criteria.tag).toLocaleLowerCase();
-  const citationTitle = criteria.citationTitle.trim();
-
-  if (!query && !normalizedTag && !citationTitle) {
-    return [];
-  }
-
-  return iterateAllEntries(workspace).filter((result) => {
-    const entry = workspace.entries[result.entryId];
-    if (!entry) {
-      return false;
-    }
-
-    const queryFields = queryScopes.flatMap((scope) => {
-      if (scope === "project") {
-        return [result.projectTitle];
-      }
-      if (scope === "chapter") {
-        return [result.chapterTitle];
-      }
-      if (scope === "time") {
-        return [entry.timeText];
-      }
-      if (scope === "summary") {
-        return [entry.summary];
-      }
-      if (scope === "source") {
-        return [entry.sourceText];
-      }
-      if (scope === "note") {
-        return [entry.note];
-      }
-      return [entry.citation];
-    });
-
-    const queryPass = query
-      ? queryFields.length > 0 && matchesTraditionalSimplified(queryFields.join("\n").trim(), query)
-      : true;
-
-    const tagPass = normalizedTag
-      ? extractTags(entry.note).some((tag) => tag.toLocaleLowerCase() === normalizedTag)
-      : true;
-
-    const citationPass = citationTitle
-      ? extractCitationTitles(entry.citation).some((title) =>
-          matchesTraditionalSimplified(title, citationTitle),
-        ) || matchesTraditionalSimplified(entry.citation, citationTitle)
-      : true;
-
-    return queryPass && tagPass && citationPass;
-  });
-}
-
 const SEARCH_DEBOUNCE_MS = 160;
 const ENTRY_VIRTUAL_ROW_HEIGHT = 256;
 const SEARCH_RESULT_VIRTUAL_ROW_HEIGHT = 188;
@@ -1097,12 +1094,13 @@ const ENTRY_VIRTUALIZE_THRESHOLD = 80;
 const SEARCH_RESULT_VIRTUALIZE_THRESHOLD = 80;
 const ADVANCED_RESULT_VIRTUALIZE_THRESHOLD = 80;
 
-type NavigationScope = "entry" | "chapter" | "project";
+type NavigationScope = "entry" | "chapter" | "project" | "search" | "advanced";
+type SearchLocationScope = "global" | "project" | "chapter";
 
 type SearchWorkerChannel = "global" | "advanced";
 
 type SearchWorkerRequest =
-  | { type: "index"; payload: IndexedEntry[] }
+  | { type: "index"; payload: WorkspaceData }
   | {
       type: "search";
       payload: { requestId: number; channel: SearchWorkerChannel; criteria: SearchCriteria };
@@ -1196,12 +1194,21 @@ function App() {
   const [draggingKey, setDraggingKey] = useState<string | null>(null);
   const [dropTargetKey, setDropTargetKey] = useState<string | null>(null);
   const [globalQuery, setGlobalQuery] = useState("");
-  const [selectedTag, setSelectedTag] = useState<string>("");
+  const [searchLocationScope, setSearchLocationScope] = useState<SearchLocationScope>("global");
+  const [sourceFormatState, setSourceFormatState] = useState<SourceFormatState>(
+    EMPTY_SOURCE_FORMAT_STATE,
+  );
   const [selectedChapterIds, setSelectedChapterIds] = useState<string[]>([]);
   const [selectedEntryIds, setSelectedEntryIds] = useState<string[]>([]);
   const [navigationScope, setNavigationScope] = useState<NavigationScope>("entry");
+  const [modalOffsets, setModalOffsets] = useState<Record<string, { x: number; y: number }>>({});
+  const [modalOrders, setModalOrders] = useState<Record<OverlayModalKey, number>>(
+    () => createOverlayModalMap(0),
+  );
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [advancedResults, setAdvancedResults] = useState<SearchResult[]>([]);
+  const [selectedSearchResultEntryId, setSelectedSearchResultEntryId] = useState<string | null>(null);
+  const [selectedAdvancedResultEntryId, setSelectedAdvancedResultEntryId] = useState<string | null>(null);
   const [entryListScrollTop, setEntryListScrollTop] = useState(0);
   const [searchResultsScrollTop, setSearchResultsScrollTop] = useState(0);
   const [advancedResultsScrollTop, setAdvancedResultsScrollTop] = useState(0);
@@ -1212,12 +1219,21 @@ function App() {
   const [exportScope, setExportScope] = useState<ExportScope>("active");
   const [isExportingDocx, setIsExportingDocx] = useState(false);
   const [clipboard, setClipboard] = useState<ClipboardState>(null);
+  const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
+  const [collapsedProjectIds, setCollapsedProjectIds] = useState<string[]>([]);
+  const [expandedChapterIds, setExpandedChapterIds] = useState<string[]>([]);
+  const [saveState, setSaveState] = useState<SaveState>(() =>
+    window.workspaceBridge?.saveSharedWorkspace ? "saved" : "local",
+  );
   const [modalState, setModalState] = useState<ModalState>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [sharedSyncReady, setSharedSyncReady] = useState<boolean>(
     () => !window.workspaceBridge?.loadSharedWorkspace,
   );
   const [storageModalOpen, setStorageModalOpen] = useState(false);
+  const [trashModalOpen, setTrashModalOpen] = useState(false);
+  const [storageSaveAsModalOpen, setStorageSaveAsModalOpen] = useState(false);
+  const [storageFormatInfoModalOpen, setStorageFormatInfoModalOpen] = useState(false);
   const [storageInfo, setStorageInfo] = useState<WorkspaceStorageInfo | null>(null);
   const [storagePathDraft, setStoragePathDraft] = useState("");
   const [storageStatus, setStorageStatus] = useState("");
@@ -1247,8 +1263,12 @@ function App() {
     newChapterTitle: "合併章節",
   });
   const [isSearchPending, startSearchTransition] = useTransition();
+  const [nativeSearchAvailable, setNativeSearchAvailable] = useState<boolean>(
+    () => Boolean(window.searchBridge?.query),
+  );
 
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const workspaceMenuRef = useRef<HTMLDivElement | null>(null);
   const entrySourceTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const leftPaneScrollRef = useRef<HTMLDivElement | null>(null);
   const centerPaneScrollRef = useRef<HTMLElement | null>(null);
@@ -1260,6 +1280,17 @@ function App() {
   const advancedSearchRequestRef = useRef(0);
   const chapterSelectionAnchorRef = useRef<string | null>(null);
   const entrySelectionAnchorRef = useRef<string | null>(null);
+  const modalDragStateRef = useRef<ModalDragState | null>(null);
+  const modalOrderCounterRef = useRef(0);
+  const modalOpenStateRef = useRef<Record<OverlayModalKey, boolean>>(createOverlayModalMap(false));
+  const previousFocusedElementRef = useRef<HTMLElement | null>(null);
+  const workspaceRef = useRef(workspace);
+  const sharedRevisionRef = useRef(workspace.revision);
+  const lastPersistedSignatureRef = useRef(workspaceContentSignature(workspace));
+  const workspaceSaveTimerRef = useRef<number | null>(null);
+  const workspaceSaveInFlightRef = useRef(false);
+  const workspaceSaveQueuedRef = useRef(false);
+  workspaceRef.current = workspace;
 
   const activeProject = workspace.activeProjectId
     ? workspace.projects[workspace.activeProjectId] ?? null
@@ -1318,10 +1349,21 @@ function App() {
   }, [workspace.entries]);
 
   useEffect(() => {
-    if (selectedTag && !allTags.some((tag) => tag.toLocaleLowerCase() === selectedTag.toLocaleLowerCase())) {
-      setSelectedTag("");
+    if (
+      advancedModal.tag &&
+      !allTags.some((tag) => tag.toLocaleLowerCase() === advancedModal.tag.toLocaleLowerCase())
+    ) {
+      setAdvancedModal((state) => ({ ...state, tag: "" }));
     }
-  }, [selectedTag, allTags]);
+  }, [advancedModal.tag, allTags]);
+
+  useEffect(() => {
+    if (searchLocationScope === "project" && !activeProject) {
+      setSearchLocationScope("global");
+    } else if (searchLocationScope === "chapter" && !activeChapter) {
+      setSearchLocationScope(activeProject ? "project" : "global");
+    }
+  }, [activeChapter, activeProject, searchLocationScope]);
 
   useEffect(() => {
     setSelectedChapterIds((previous) => {
@@ -1333,6 +1375,40 @@ function App() {
       return next.length === previous.length && next.every((id, index) => id === previous[index]) ? previous : next;
     });
   }, [workspace.chapters, workspace.entries]);
+
+  useEffect(() => {
+    setCollapsedProjectIds((previous) =>
+      previous.filter((projectId) => Boolean(workspace.projects[projectId])),
+    );
+    setExpandedChapterIds((previous) =>
+      previous.filter((chapterId) => Boolean(workspace.chapters[chapterId])),
+    );
+  }, [workspace.chapters, workspace.projects]);
+
+  useEffect(() => {
+    if (!workspaceMenuOpen) {
+      return undefined;
+    }
+
+    const closeMenu = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && workspaceMenuRef.current?.contains(target)) {
+        return;
+      }
+      setWorkspaceMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setWorkspaceMenuOpen(false);
+      }
+    };
+    window.addEventListener("pointerdown", closeMenu);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      window.removeEventListener("pointerdown", closeMenu);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [workspaceMenuOpen]);
 
   useEffect(() => {
     const fallbackProjectId = workspace.activeProjectId ?? workspace.projectOrder[0] ?? "";
@@ -1392,6 +1468,52 @@ function App() {
   }, [workspace]);
 
   useEffect(() => {
+    if (!advancedModal.open && navigationScope === "advanced") {
+      setNavigationScope("search");
+    }
+  }, [advancedModal.open, navigationScope]);
+
+  useEffect(() => {
+    function handlePointerMove(event: PointerEvent): void {
+      const dragState = modalDragStateRef.current;
+      if (!dragState) {
+        return;
+      }
+      const nextX = Math.min(
+        dragState.maxX,
+        Math.max(dragState.minX, dragState.originX + (event.clientX - dragState.startX)),
+      );
+      const nextY = Math.min(
+        dragState.maxY,
+        Math.max(dragState.minY, dragState.originY + (event.clientY - dragState.startY)),
+      );
+      setModalOffsets((previous) => {
+        const current = previous[dragState.key] ?? { x: 0, y: 0 };
+        if (current.x === nextX && current.y === nextY) {
+          return previous;
+        }
+        return {
+          ...previous,
+          [dragState.key]: { x: nextX, y: nextY },
+        };
+      });
+    }
+
+    function handlePointerRelease(): void {
+      modalDragStateRef.current = null;
+    }
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", handlePointerRelease);
+    window.addEventListener("pointercancel", handlePointerRelease);
+    return () => {
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", handlePointerRelease);
+      window.removeEventListener("pointercancel", handlePointerRelease);
+    };
+  }, []);
+
+  useEffect(() => {
     const elements = [
       leftPaneScrollRef.current,
       centerPaneScrollRef.current,
@@ -1435,35 +1557,30 @@ function App() {
     };
   }, [advancedModal.open]);
 
-  const searchIndex = useMemo(() => buildSearchIndex(workspace), [workspace]);
+  const contentSignature = useMemo(
+    () => workspaceContentSignature(workspace),
+    [workspace.projectOrder, workspace.projects, workspace.chapters, workspace.entries],
+  );
 
   const debouncedGlobalQuery = useDebouncedValue(globalQuery);
-  const debouncedSelectedTag = useDebouncedValue(selectedTag);
   const debouncedAdvancedQuery = useDebouncedValue(advancedModal.query);
   const debouncedAdvancedTag = useDebouncedValue(advancedModal.tag);
-  const debouncedAdvancedCitationTitle = useDebouncedValue(advancedModal.citationTitle);
 
   const deferredGlobalQuery = useDeferredValue(debouncedGlobalQuery);
-  const deferredSelectedTag = useDeferredValue(debouncedSelectedTag);
   const deferredAdvancedQuery = useDeferredValue(debouncedAdvancedQuery);
   const deferredAdvancedTag = useDeferredValue(debouncedAdvancedTag);
-  const deferredAdvancedCitationTitle = useDeferredValue(debouncedAdvancedCitationTitle);
   const deferredAdvancedQueryScopes = useDeferredValue(advancedModal.queryScopes);
 
-  const hasSearch = Boolean(deferredGlobalQuery.trim() || normalizeTagInput(deferredSelectedTag));
-  const searchHighlightQuery = globalQuery.trim() || normalizeTagInput(selectedTag);
+  const hasSearch = Boolean(deferredGlobalQuery.trim());
+  const searchHighlightQuery = globalQuery.trim();
   const advancedHighlightQuery =
-    advancedModal.query.trim() ||
-    advancedModal.citationTitle.trim() ||
-    normalizeTagInput(advancedModal.tag);
+    advancedModal.query.trim() || normalizeTagInput(advancedModal.tag);
   const centerEntryHighlightQuery = advancedModal.open
     ? advancedHighlightQuery
     : searchHighlightQuery;
 
   const hasAdvancedSearch = Boolean(
-    deferredAdvancedQuery.trim() ||
-      normalizeTagInput(deferredAdvancedTag) ||
-      deferredAdvancedCitationTitle.trim(),
+    deferredAdvancedQuery.trim() || normalizeTagInput(deferredAdvancedTag),
   );
   const hasAdvancedQueryScope = deferredAdvancedQueryScopes.length > 0;
   const entryListViewportHeight = useContainerHeight(centerPaneScrollRef);
@@ -1557,16 +1674,48 @@ function App() {
     [advancedResults, advancedVirtualRange.end, advancedVirtualRange.start],
   );
 
+  useEffect(() => {
+    if (!hasSearch || searchResults.length === 0) {
+      if (selectedSearchResultEntryId !== null) {
+        setSelectedSearchResultEntryId(null);
+      }
+      return;
+    }
+    if (!selectedSearchResultEntryId || !searchResults.some((result) => result.entryId === selectedSearchResultEntryId)) {
+      setSelectedSearchResultEntryId(searchResults[0].entryId);
+    }
+  }, [hasSearch, searchResults, selectedSearchResultEntryId]);
+
+  useEffect(() => {
+    if (!hasAdvancedSearch || advancedResults.length === 0) {
+      if (selectedAdvancedResultEntryId !== null) {
+        setSelectedAdvancedResultEntryId(null);
+      }
+      return;
+    }
+    if (
+      !selectedAdvancedResultEntryId ||
+      !advancedResults.some((result) => result.entryId === selectedAdvancedResultEntryId)
+    ) {
+      setSelectedAdvancedResultEntryId(advancedResults[0].entryId);
+    }
+  }, [hasAdvancedSearch, advancedResults, selectedAdvancedResultEntryId]);
+
   async function queryBySqlite(criteria: SearchCriteria): Promise<SearchResult[] | null> {
-    if (!window.searchBridge?.query) {
+    if (!nativeSearchAvailable || !window.searchBridge?.query) {
       return null;
     }
     try {
-      return await window.searchBridge.query({
+      const result = await window.searchBridge.query({
         ...criteria,
         limit: 2000,
       });
+      if (result === null) {
+        setNativeSearchAvailable(false);
+      }
+      return result;
     } catch {
+      setNativeSearchAvailable(false);
       return null;
     }
   }
@@ -1620,21 +1769,26 @@ function App() {
 
   useEffect(() => {
     const worker = searchWorkerRef.current;
-    if (!worker) {
+    if (!worker || nativeSearchAvailable) {
       return;
     }
-    const request: SearchWorkerRequest = { type: "index", payload: searchIndex };
+    const request: SearchWorkerRequest = { type: "index", payload: workspaceRef.current };
     worker.postMessage(request);
-  }, [searchIndex]);
+  }, [contentSignature, nativeSearchAvailable]);
 
   useEffect(() => {
     const criteria: SearchCriteria = {
       query: deferredGlobalQuery,
-      tag: deferredSelectedTag,
+      tag: "",
       citationTitle: "",
+      projectId:
+        searchLocationScope === "project" || searchLocationScope === "chapter"
+          ? activeProject?.id
+          : undefined,
+      chapterId: searchLocationScope === "chapter" ? activeChapter?.id : undefined,
     };
 
-    if (!criteria.query.trim() && !normalizeTagInput(criteria.tag)) {
+    if (!criteria.query.trim()) {
       startSearchTransition(() => setSearchResults([]));
       return;
     }
@@ -1667,7 +1821,8 @@ function App() {
         return;
       }
 
-      const next = searchInIndex(searchIndex, criteria);
+      const { buildSearchIndex, searchInIndex } = await import("./search-engine");
+      const next = searchInIndex(buildSearchIndex(workspaceRef.current), criteria);
       startSearchTransition(() => setSearchResults(next));
     }
 
@@ -1675,17 +1830,24 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [deferredGlobalQuery, deferredSelectedTag, searchIndex, startSearchTransition]);
+  }, [
+    activeChapter?.id,
+    activeProject?.id,
+    deferredGlobalQuery,
+    nativeSearchAvailable,
+    searchLocationScope,
+    startSearchTransition,
+  ]);
 
   useEffect(() => {
     const criteria: SearchCriteria = {
       query: deferredAdvancedQuery,
       queryScopes: deferredAdvancedQueryScopes,
       tag: deferredAdvancedTag,
-      citationTitle: deferredAdvancedCitationTitle,
+      citationTitle: "",
     };
 
-    if (!criteria.query.trim() && !normalizeTagInput(criteria.tag) && !criteria.citationTitle.trim()) {
+    if (!criteria.query.trim() && !normalizeTagInput(criteria.tag)) {
       startSearchTransition(() => setAdvancedResults([]));
       return;
     }
@@ -1723,7 +1885,8 @@ function App() {
         return;
       }
 
-      const next = searchInIndex(searchIndex, criteria);
+      const { buildSearchIndex, searchInIndex } = await import("./search-engine");
+      const next = searchInIndex(buildSearchIndex(workspaceRef.current), criteria);
       startSearchTransition(() => setAdvancedResults(next));
     }
 
@@ -1732,11 +1895,10 @@ function App() {
       cancelled = true;
     };
   }, [
-    deferredAdvancedCitationTitle,
     deferredAdvancedQuery,
     deferredAdvancedQueryScopes,
     deferredAdvancedTag,
-    searchIndex,
+    nativeSearchAvailable,
     startSearchTransition,
   ]);
 
@@ -1783,6 +1945,69 @@ function App() {
     };
   }, []);
 
+  async function persistLatestWorkspace(): Promise<void> {
+    const payload = workspaceRef.current;
+    const payloadSignature = workspaceContentSignature(payload);
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(payload));
+
+    if (!sharedSyncReady || !window.workspaceBridge?.saveSharedWorkspace) {
+      lastPersistedSignatureRef.current = payloadSignature;
+      setSaveState("local");
+      return;
+    }
+    if (payloadSignature === lastPersistedSignatureRef.current) {
+      return;
+    }
+    if (workspaceSaveInFlightRef.current) {
+      workspaceSaveQueuedRef.current = true;
+      return;
+    }
+
+    workspaceSaveInFlightRef.current = true;
+    setSaveState("saving");
+    let allowQueuedRetry = true;
+    try {
+      const result = await window.workspaceBridge.saveSharedWorkspace(
+        payload,
+        sharedRevisionRef.current,
+      );
+      if (!result.ok) {
+        allowQueuedRetry = false;
+        workspaceSaveQueuedRef.current = false;
+        setStorageStatus(
+          result.conflict
+            ? `${result.error || "資料已在外部更新"}。本機內容已保留，請先備份後重新載入。`
+            : `自動儲存失敗：${result.error || "未知錯誤"}`,
+        );
+        setSaveState("error");
+        return;
+      }
+
+      const revision = Number.isInteger(result.revision) ? result.revision : sharedRevisionRef.current;
+      sharedRevisionRef.current = revision ?? 0;
+      lastPersistedSignatureRef.current = payloadSignature;
+      setWorkspace((current) =>
+        current.revision === revision ? current : { ...current, revision: revision ?? current.revision },
+      );
+      setSaveState("saved");
+      setStorageStatus((current) => (current.startsWith("自動儲存失敗") ? "已恢復自動儲存。" : current));
+    } catch {
+      allowQueuedRetry = false;
+      setSaveState("error");
+      setStorageStatus("自動儲存失敗；本機瀏覽器備份仍已保留。");
+    } finally {
+      workspaceSaveInFlightRef.current = false;
+      const latestSignature = workspaceContentSignature(workspaceRef.current);
+      const shouldRetry =
+        allowQueuedRetry &&
+        (workspaceSaveQueuedRef.current || latestSignature !== lastPersistedSignatureRef.current);
+      workspaceSaveQueuedRef.current = false;
+      if (shouldRetry) {
+        window.setTimeout(() => void persistLatestWorkspace(), 0);
+      }
+    }
+  }
+
   useEffect(() => {
     if (!window.workspaceBridge?.loadSharedWorkspace) {
       setSharedSyncReady(true);
@@ -1792,11 +2017,24 @@ function App() {
     let cancelled = false;
     void window.workspaceBridge
       .loadSharedWorkspace()
-      .then((raw) => {
-        if (cancelled || !raw || typeof raw !== "object") {
+      .then((result) => {
+        if (cancelled) {
           return;
         }
-        setWorkspace(cleanupWorkspace(raw as WorkspaceData));
+        if (!result.ok) {
+          setStorageStatus(`資料檔讀取失敗：${result.error || "未知錯誤"}；未覆蓋原檔。`);
+          return;
+        }
+        sharedRevisionRef.current = result.revision ?? 0;
+        if (!result.workspace || typeof result.workspace !== "object") {
+          lastPersistedSignatureRef.current = "";
+          return;
+        }
+        const next = cleanupWorkspace(result.workspace as WorkspaceData);
+        workspaceRef.current = next;
+        lastPersistedSignatureRef.current = workspaceContentSignature(next);
+        setWorkspace(next);
+        setSaveState("saved");
       })
       .catch(() => {
         // Ignore bridge errors and keep local storage data.
@@ -1813,14 +2051,63 @@ function App() {
   }, []);
 
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(workspace));
-    if (!sharedSyncReady || !window.workspaceBridge?.saveSharedWorkspace) {
-      return;
+    if (contentSignature === lastPersistedSignatureRef.current) {
+      return undefined;
     }
-    void window.workspaceBridge.saveSharedWorkspace(workspace).catch(() => {
-      // Ignore bridge errors and keep local storage data.
+    setSaveState(window.workspaceBridge?.saveSharedWorkspace ? "pending" : "local");
+    if (workspaceSaveTimerRef.current !== null) {
+      window.clearTimeout(workspaceSaveTimerRef.current);
+    }
+    workspaceSaveTimerRef.current = window.setTimeout(() => {
+      workspaceSaveTimerRef.current = null;
+      void persistLatestWorkspace();
+    }, WORKSPACE_SAVE_DEBOUNCE_MS);
+    return () => {
+      if (workspaceSaveTimerRef.current !== null) {
+        window.clearTimeout(workspaceSaveTimerRef.current);
+        workspaceSaveTimerRef.current = null;
+      }
+    };
+  }, [contentSignature, sharedSyncReady]);
+
+  useEffect(() => {
+    const bridge = window.workspaceBridge;
+    if (!sharedSyncReady || !bridge?.onExternalWorkspaceChanged) {
+      return undefined;
+    }
+    return bridge.onExternalWorkspaceChanged(() => {
+      const latestSignature = workspaceContentSignature(workspaceRef.current);
+      const hasUnsavedChanges =
+        workspaceSaveTimerRef.current !== null ||
+        workspaceSaveInFlightRef.current ||
+        latestSignature !== lastPersistedSignatureRef.current;
+      if (hasUnsavedChanges) {
+        setStorageStatus("偵測到外部資料更新，但本機也有未儲存內容；請先備份，再重新載入以處理衝突。");
+        return;
+      }
+      void bridge.loadSharedWorkspace().then((result) => {
+        if (!result.ok || !result.workspace || typeof result.workspace !== "object") {
+          setStorageStatus(`外部資料更新後讀取失敗：${result.error || "未知錯誤"}`);
+          return;
+        }
+        const next = cleanupWorkspace(result.workspace as WorkspaceData);
+        sharedRevisionRef.current = result.revision ?? next.revision;
+        lastPersistedSignatureRef.current = workspaceContentSignature(next);
+        workspaceRef.current = next;
+        setWorkspace(next);
+        setSaveState("saved");
+        setStorageStatus("已載入由 MCP 或其他程序寫入的最新資料。");
+      });
     });
-  }, [sharedSyncReady, workspace]);
+  }, [sharedSyncReady]);
+
+  useEffect(() => {
+    const flushLocalBackup = () => {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(workspaceRef.current));
+    };
+    window.addEventListener("beforeunload", flushLocalBackup);
+    return () => window.removeEventListener("beforeunload", flushLocalBackup);
+  }, []);
 
   useEffect(() => {
     localStorage.setItem(APPEARANCE_KEY, JSON.stringify(appearance));
@@ -1897,7 +2184,10 @@ function App() {
         setMergeModal((state) => ({ ...state, open: false }));
         setAdvancedModal((state) => ({ ...state, open: false }));
         setChapterMergeModal((state) => ({ ...state, open: false }));
+        setStorageSaveAsModalOpen(false);
+        setStorageFormatInfoModalOpen(false);
         setStorageModalOpen(false);
+        setTrashModalOpen(false);
         return;
       }
 
@@ -1905,15 +2195,35 @@ function App() {
       const isTypingTarget = Boolean(
         target?.closest('input, textarea, select, [contenteditable="true"], [contenteditable=""], [role="textbox"]'),
       );
+      const isArrowNavigationKey = event.key === "ArrowDown" || event.key === "ArrowUp";
+      const isModifierPressed = event.metaKey || event.ctrlKey;
+      const key = event.key.toLocaleLowerCase();
+      const allowArrowNavigationFromTypingTarget =
+        isArrowNavigationKey && (navigationScope === "search" || (navigationScope === "advanced" && advancedModal.open));
+      const allowSearchShortcutFromTypingTarget = isModifierPressed && !event.altKey && key === "f";
       if (isTypingTarget) {
-        return;
+        if (!allowArrowNavigationFromTypingTarget && !allowSearchShortcutFromTypingTarget) {
+          return;
+        }
       }
       if (modalState || contextMenu) {
         return;
       }
 
-      const isModifierPressed = event.metaKey || event.ctrlKey;
-      const key = event.key.toLocaleLowerCase();
+      if (isModifierPressed && !event.altKey && key === "f") {
+        event.preventDefault();
+        setAdvancedModal((state) => (state.open ? { ...state, open: false } : state));
+        setNavigationScope("search");
+        window.requestAnimationFrame(() => {
+          const input = document.getElementById("global-search-input");
+          if (input instanceof HTMLInputElement) {
+            input.focus();
+            input.select();
+          }
+        });
+        return;
+      }
+
       if (isModifierPressed && !event.altKey && key === "c") {
         const selectedText = window.getSelection?.()?.toString().trim() ?? "";
         if (selectedText.length > 0) {
@@ -1972,7 +2282,7 @@ function App() {
         return;
       }
 
-      if (event.key !== "ArrowDown" && event.key !== "ArrowUp") {
+      if (!isArrowNavigationKey) {
         return;
       }
 
@@ -1988,6 +2298,44 @@ function App() {
         return orderedIds[nextIndex] ?? null;
       };
 
+      if (navigationScope === "advanced" && advancedModal.open && advancedResults.length > 0) {
+        const orderedAdvancedEntryIds = advancedResults.map((result) => result.entryId);
+        const nextAdvancedEntryId = moveSelection(orderedAdvancedEntryIds, selectedAdvancedResultEntryId);
+        if (!nextAdvancedEntryId) {
+          return;
+        }
+        const nextAdvancedResult = advancedResults.find((result) => result.entryId === nextAdvancedEntryId);
+        if (!nextAdvancedResult) {
+          return;
+        }
+        setSelectedAdvancedResultEntryId(nextAdvancedEntryId);
+        jumpToSearchResult(nextAdvancedResult, advancedHighlightQuery, "advanced");
+        window.requestAnimationFrame(() => {
+          const node = document.querySelector<HTMLElement>(`[data-advanced-entry-id="${nextAdvancedEntryId}"]`);
+          node?.scrollIntoView({ block: "nearest" });
+        });
+        return;
+      }
+
+      if (navigationScope === "search" && !advancedModal.open && searchResults.length > 0) {
+        const orderedSearchEntryIds = searchResults.map((result) => result.entryId);
+        const nextSearchEntryId = moveSelection(orderedSearchEntryIds, selectedSearchResultEntryId);
+        if (!nextSearchEntryId) {
+          return;
+        }
+        const nextSearchResult = searchResults.find((result) => result.entryId === nextSearchEntryId);
+        if (!nextSearchResult) {
+          return;
+        }
+        setSelectedSearchResultEntryId(nextSearchEntryId);
+        jumpToSearchResult(nextSearchResult, searchHighlightQuery, "search");
+        window.requestAnimationFrame(() => {
+          const node = document.querySelector<HTMLElement>(`[data-search-entry-id="${nextSearchEntryId}"]`);
+          node?.scrollIntoView({ block: "nearest" });
+        });
+        return;
+      }
+
       if (navigationScope === "entry" && currentEntryIds.length > 0) {
         const orderedSelectedEntryIds = currentEntryIds.filter((entryId) => selectedEntryIdSet.has(entryId));
         const currentId =
@@ -1999,9 +2347,7 @@ function App() {
         if (!nextEntryId) {
           return;
         }
-        mutateWorkspace((draft) => {
-          draft.selectedEntryId = nextEntryId;
-        });
+        setWorkspace((previous) => ({ ...previous, selectedEntryId: nextEntryId }));
         setSelectedEntryIds([nextEntryId]);
         entrySelectionAnchorRef.current = nextEntryId;
         setNavigationScope("entry");
@@ -2048,17 +2394,24 @@ function App() {
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [
+    advancedHighlightQuery,
     activeChapter,
     activeProject,
+    advancedModal.open,
+    advancedResults,
     clipboard,
     contextMenu,
     currentEntryIds,
     modalState,
     navigationScope,
+    searchHighlightQuery,
+    searchResults,
+    selectedAdvancedResultEntryId,
     selectedChapterIdSet,
     selectedChapterIds,
     selectedEntryIdSet,
     selectedEntryIds,
+    selectedSearchResultEntryId,
     workspace.activeProjectId,
     workspace.chapters,
     workspace.projectOrder,
@@ -2074,6 +2427,45 @@ function App() {
     });
   }
 
+  function toggleProjectCollapsed(projectId: string): void {
+    setCollapsedProjectIds((previous) =>
+      previous.includes(projectId)
+        ? previous.filter((id) => id !== projectId)
+        : [...previous, projectId],
+    );
+  }
+
+  function toggleChapterExpanded(chapterId: string): void {
+    setExpandedChapterIds((previous) =>
+      previous.includes(chapterId)
+        ? previous.filter((id) => id !== chapterId)
+        : [...previous, chapterId],
+    );
+  }
+
+  function selectEntryFromTree(entryId: string): void {
+    const entry = workspace.entries[entryId];
+    if (!entry) {
+      return;
+    }
+    setWorkspace((previous) => ({
+      ...previous,
+      activeProjectId: entry.projectId,
+      activeChapterId: entry.chapterId,
+      selectedEntryId: entry.id,
+    }));
+    setSelectedChapterIds(entry.chapterId ? [entry.chapterId] : []);
+    setSelectedEntryIds([entry.id]);
+    chapterSelectionAnchorRef.current = entry.chapterId;
+    entrySelectionAnchorRef.current = entry.id;
+    setNavigationScope("entry");
+    window.requestAnimationFrame(() => {
+      document.querySelector<HTMLElement>(`[data-entry-id="${entry.id}"]`)?.scrollIntoView({
+        block: "nearest",
+      });
+    });
+  }
+
   function configureMoveDrag(event: DragEvent): void {
     event.dataTransfer.effectAllowed = "move";
     event.dataTransfer.dropEffect = "move";
@@ -2086,12 +2478,70 @@ function App() {
     setDropTargetKey(null);
   }
 
+  function activateOverlayModal(key: OverlayModalKey): void {
+    setModalOrders((previous) => {
+      const highestOrder = Math.max(...Object.values(previous));
+      if (previous[key] >= highestOrder) {
+        return previous;
+      }
+      const nextOrder = modalOrderCounterRef.current + 1;
+      modalOrderCounterRef.current = nextOrder;
+      return {
+        ...previous,
+        [key]: nextOrder,
+      };
+    });
+  }
+
+  function modalBackdropStyle(key: OverlayModalKey): CSSProperties {
+    return {
+      zIndex: MODAL_BASE_Z_INDEX + modalOrders[key] * MODAL_Z_INDEX_STEP,
+    };
+  }
+
+  function startModalDrag(event: MouseEvent<HTMLElement>, key: OverlayModalKey): void {
+    if (event.button !== 0) {
+      return;
+    }
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    if (target?.closest("button, input, textarea, select, a")) {
+      return;
+    }
+    activateOverlayModal(key);
+    const origin = modalOffsets[key] ?? { x: 0, y: 0 };
+    const card = event.currentTarget.closest<HTMLElement>(".modal-card");
+    const rect = card?.getBoundingClientRect();
+    const viewportPadding = 8;
+    modalDragStateRef.current = {
+      key,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: origin.x,
+      originY: origin.y,
+      minX: rect ? origin.x - rect.left + viewportPadding : -window.innerWidth / 2,
+      maxX: rect ? origin.x + window.innerWidth - rect.right - viewportPadding : window.innerWidth / 2,
+      minY: rect ? origin.y - rect.top + viewportPadding : -window.innerHeight / 2,
+      maxY: rect ? origin.y + window.innerHeight - rect.bottom - viewportPadding : window.innerHeight / 2,
+    };
+    event.preventDefault();
+  }
+
+  function modalCardStyle(key: string): CSSProperties {
+    const offset = modalOffsets[key];
+    if (!offset) {
+      return {};
+    }
+    return { transform: `translate(${offset.x}px, ${offset.y}px)` };
+  }
+
   function selectProject(projectId: string): void {
-    mutateWorkspace((draft) => {
-      draft.activeProjectId = projectId;
-      draft.activeChapterId = null;
-      const project = draft.projects[projectId];
-      draft.selectedEntryId = project?.entryIds[0] ?? firstEntryInProject(draft, projectId);
+    setWorkspace((previous) => {
+      return {
+        ...previous,
+        activeProjectId: projectId,
+        activeChapterId: null,
+        selectedEntryId: firstEntryInProject(previous, projectId),
+      };
     });
     setSelectedChapterIds([]);
     setSelectedEntryIds([]);
@@ -2101,11 +2551,14 @@ function App() {
   }
 
   function selectChapter(projectId: string, chapterId: string): void {
-    mutateWorkspace((draft) => {
-      draft.activeProjectId = projectId;
-      draft.activeChapterId = chapterId;
-      const chapter = draft.chapters[chapterId];
-      draft.selectedEntryId = chapter?.entryIds[0] ?? null;
+    setWorkspace((previous) => {
+      const chapter = previous.chapters[chapterId];
+      return {
+        ...previous,
+        activeProjectId: projectId,
+        activeChapterId: chapterId,
+        selectedEntryId: chapter?.entryIds[0] ?? null,
+      };
     });
     setSelectedChapterIds([chapterId]);
     setSelectedEntryIds([]);
@@ -2124,11 +2577,14 @@ function App() {
           ? activeChapter.id
           : chapterId;
 
-    mutateWorkspace((draft) => {
-      draft.activeProjectId = projectId;
-      draft.activeChapterId = chapterId;
-      const chapter = draft.chapters[chapterId];
-      draft.selectedEntryId = chapter?.entryIds[0] ?? null;
+    setWorkspace((previous) => {
+      const chapter = previous.chapters[chapterId];
+      return {
+        ...previous,
+        activeProjectId: projectId,
+        activeChapterId: chapterId,
+        selectedEntryId: chapter?.entryIds[0] ?? null,
+      };
     });
     setSelectedEntryIds([]);
     entrySelectionAnchorRef.current = null;
@@ -2150,9 +2606,7 @@ function App() {
           ? workspace.selectedEntryId
           : entryId;
 
-    mutateWorkspace((draft) => {
-      draft.selectedEntryId = entryId;
-    });
+    setWorkspace((previous) => ({ ...previous, selectedEntryId: entryId }));
 
     if (event.shiftKey) {
       setSelectedEntryIds(buildIdRange(currentEntryIds, fallbackAnchor, entryId));
@@ -2163,12 +2617,48 @@ function App() {
     setNavigationScope("entry");
   }
 
-  function jumpToSearchResult(result: SearchResult, highlightQuery = ""): void {
-    mutateWorkspace((draft) => {
-      draft.activeProjectId = result.projectId;
-      draft.activeChapterId = result.chapterId;
-      draft.selectedEntryId = result.entryId;
+  function scrollCenterToSearchResult(result: SearchResult): void {
+    const scopedEntryIds = workspace.chapters[result.chapterId]?.entryIds ?? [];
+    const targetIndex = scopedEntryIds.indexOf(result.entryId);
+
+    window.requestAnimationFrame(() => {
+      const container = centerPaneScrollRef.current;
+      if (container && scopedEntryIds.length > ENTRY_VIRTUALIZE_THRESHOLD && targetIndex >= 0) {
+        const nextScrollTop = Math.max(
+          0,
+          targetIndex * ENTRY_VIRTUAL_ROW_HEIGHT -
+            Math.max(0, (container.clientHeight - ENTRY_VIRTUAL_ROW_HEIGHT) / 2),
+        );
+        container.scrollTop = nextScrollTop;
+        setEntryListScrollTop(nextScrollTop);
+      }
+      window.requestAnimationFrame(() => {
+        document
+          .querySelector<HTMLElement>(`[data-entry-id="${result.entryId}"]`)
+          ?.scrollIntoView({ block: "center" });
+      });
     });
+  }
+
+  function jumpToSearchResult(
+    result: SearchResult,
+    highlightQuery = "",
+    targetNavigationScope: "search" | "advanced" = "search",
+  ): void {
+    setWorkspace((previous) => ({
+      ...previous,
+      activeProjectId: result.projectId,
+      activeChapterId: result.chapterId,
+      selectedEntryId: result.entryId,
+    }));
+    setSelectedChapterIds([result.chapterId]);
+    setSelectedEntryIds([result.entryId]);
+    chapterSelectionAnchorRef.current = result.chapterId;
+    entrySelectionAnchorRef.current = result.entryId;
+    setCollapsedProjectIds((previous) => previous.filter((projectId) => projectId !== result.projectId));
+    setExpandedChapterIds((previous) =>
+      previous.includes(result.chapterId) ? previous : [...previous, result.chapterId],
+    );
     const normalizedHighlight = highlightQuery.trim();
     setEntryHighlightContext(
       normalizedHighlight
@@ -2178,7 +2668,8 @@ function App() {
           }
         : null,
     );
-    setNavigationScope("entry");
+    setNavigationScope(targetNavigationScope);
+    scrollCenterToSearchResult(result);
   }
 
   function beginCreateProject(insertAfterProjectId: string | null = null): void {
@@ -2223,6 +2714,8 @@ function App() {
       highlightQuery.trim() ||
       (entryHighlightContext?.entryId === entryId ? entryHighlightContext.query : "");
 
+    setSourceFormatState(EMPTY_SOURCE_FORMAT_STATE);
+    activateOverlayModal("entry-view");
     setModalState({
       kind: "entry-view",
       entryId,
@@ -2240,6 +2733,8 @@ function App() {
     const resolvedHighlight =
       highlightQuery.trim() ||
       (entryHighlightContext?.entryId === entryId ? entryHighlightContext.query : "");
+    setSourceFormatState(EMPTY_SOURCE_FORMAT_STATE);
+    activateOverlayModal("entry-view");
     setModalState({
       kind: "entry-view",
       entryId,
@@ -2250,10 +2745,10 @@ function App() {
   }
 
   function resolveEntryInsertAfterIdForCurrentScope(fallbackEntryId: string | null = null): string | null {
-    if (!activeProject) {
+    if (!activeProject || !activeChapter) {
       return null;
     }
-    const chapterId = activeChapter?.id ?? null;
+    const chapterId = activeChapter.id;
     const orderedSelectedEntryIds = currentEntryIds.filter((entryId) => selectedEntryIdSet.has(entryId));
     const preferredEntryId =
       orderedSelectedEntryIds.length > 0
@@ -2263,7 +2758,18 @@ function App() {
   }
 
   function beginCreateEntryAfter(entryId: string): void {
-    createEntry(entryId);
+    const entry = workspace.entries[entryId];
+    if (!entry || !workspace.chapters[entry.chapterId]) {
+      return;
+    }
+    setSourceFormatState(EMPTY_SOURCE_FORMAT_STATE);
+    setModalState({
+      kind: "entry-create",
+      projectId: entry.projectId,
+      chapterId: entry.chapterId,
+      insertAfterEntryId: entryId,
+      draft: createEmptyEntryDraft(),
+    });
   }
 
   function copyCurrentProject(projectId: string): void {
@@ -2292,9 +2798,7 @@ function App() {
     if (!entry) {
       return [];
     }
-    const scopeIds = entry.chapterId
-      ? workspace.chapters[entry.chapterId]?.entryIds ?? []
-      : workspace.projects[entry.projectId]?.entryIds ?? [];
+    const scopeIds = workspace.chapters[entry.chapterId]?.entryIds ?? [];
     const entryIdSet = new Set(entryIds);
     return scopeIds.filter((id) => entryIdSet.has(id) && Boolean(workspace.entries[id]));
   }
@@ -2307,10 +2811,6 @@ function App() {
       return;
     }
     setClipboard({ kind: "chapter", snapshots });
-  }
-
-  function copyChapterToClipboard(chapterId: string): void {
-    copyChaptersToClipboard([chapterId]);
   }
 
   function pasteProjectFromClipboard(insertAfterProjectId: string | null = null): void {
@@ -2327,7 +2827,6 @@ function App() {
         id: projectId,
         title: projectTitle,
         chapterIds: [],
-        entryIds: [],
         createdAt: Date.now(),
       };
       if (resolvedInsertAfterProjectId) {
@@ -2342,13 +2841,6 @@ function App() {
       }
 
       let firstEntryId: string | null = null;
-      for (const item of clipboard.snapshot.directEntries) {
-        const entryId = appendEntryDraft(draft, projectId, null, item);
-        if (!firstEntryId) {
-          firstEntryId = entryId;
-        }
-      }
-
       for (const chapter of clipboard.snapshot.chapters) {
         const chapterId = appendChapterWithEntries(draft, projectId, chapter.title, chapter.entries);
         const first = chapterId ? draft.chapters[chapterId]?.entryIds[0] ?? null : null;
@@ -2474,20 +2966,24 @@ function App() {
         ? insertAfterEntryId
         : undefined;
 
+    // 史料必須落在章節之下，沒有指定或選中章節就不貼上。
+    const requestedChapterId =
+      targetChapterId !== undefined ? targetChapterId : workspace.activeChapterId;
+    const scopedChapterId =
+      requestedChapterId && workspace.chapters[requestedChapterId]?.projectId === resolvedProjectId
+        ? requestedChapterId
+        : null;
+    if (!scopedChapterId) {
+      setStorageStatus("請先選擇章節，再貼上史料。");
+      return;
+    }
+
     mutateWorkspace((draft) => {
       const targetProject = draft.projects[resolvedProjectId];
       if (!targetProject) {
         return;
       }
 
-      const scopedChapterId =
-        targetChapterId !== undefined
-          ? targetChapterId && draft.chapters[targetChapterId]?.projectId === targetProject.id
-            ? targetChapterId
-            : null
-          : draft.activeChapterId && draft.chapters[draft.activeChapterId]?.projectId === targetProject.id
-            ? draft.activeChapterId
-            : null;
       const safeInsertAfterEntryId = resolveInsertAfterEntryId(
         draft,
         targetProject.id,
@@ -2588,7 +3084,6 @@ function App() {
           id: projectId,
           title: ensureUniqueProjectTitle(draft, title),
           chapterIds: [],
-          entryIds: [],
           createdAt: Date.now(),
         };
         if (modalState.insertAfterProjectId) {
@@ -2732,8 +3227,12 @@ function App() {
           return;
         }
 
+        // 史料必須落在章節之下。
         const targetChapterId =
           chapterId && workspaceDraft.chapters[chapterId]?.projectId === projectId ? chapterId : null;
+        if (!targetChapterId) {
+          return;
+        }
         const safeInsertAfterId = resolveInsertAfterEntryId(
           workspaceDraft,
           projectId,
@@ -2778,7 +3277,7 @@ function App() {
       return;
     }
 
-    const confirmed = window.confirm(`刪除專案「${project.title}」？此操作會移除其全部章節與史料。`);
+    const confirmed = window.confirm(`將專案「${project.title}」移至回收站？其全部章節與史料會一併移入。`);
     if (!confirmed) {
       return;
     }
@@ -2789,9 +3288,29 @@ function App() {
         return;
       }
 
-      for (const entryId of target.entryIds) {
-        delete draft.entries[entryId];
-      }
+      const trashedChapters = target.chapterIds
+        .map((chapterId) => draft.chapters[chapterId])
+        .filter((chapter): chapter is Chapter => Boolean(chapter))
+        .map((chapter) => structuredClone(chapter));
+      const trashedEntryIds = trashedChapters.flatMap((chapter) => chapter.entryIds);
+      const trashedEntries = trashedEntryIds
+        .map((entryId) => draft.entries[entryId])
+        .filter((entry): entry is Entry => Boolean(entry))
+        .map((entry) => structuredClone(entry));
+      prependTrashItem(draft,
+        {
+          id: createId("trash"),
+          deletedAt: Date.now(),
+          label: project.title,
+          payload: {
+            kind: "project",
+            projectIndex: Math.max(0, draft.projectOrder.indexOf(projectId)),
+            project: structuredClone(target),
+            chapters: trashedChapters,
+            entries: trashedEntries,
+          },
+        },
+      );
 
       for (const chapterId of target.chapterIds) {
         const chapter = draft.chapters[chapterId];
@@ -2812,6 +3331,7 @@ function App() {
         draft.activeChapterId = null;
       }
     });
+    setStorageStatus(`已將專案「${project.title}」移至回收站。`);
   }
 
   function deleteChapter(chapterId: string): void {
@@ -2820,7 +3340,7 @@ function App() {
       return;
     }
 
-    const confirmed = window.confirm(`刪除章節「${chapter.title}」？此章節下史料會一併刪除。`);
+    const confirmed = window.confirm(`將章節「${chapter.title}」移至回收站？其下史料會一併移入。`);
     if (!confirmed) {
       return;
     }
@@ -2831,11 +3351,33 @@ function App() {
         return;
       }
 
+      const project = draft.projects[target.projectId];
+      const trashedEntries = target.entryIds
+        .map((entryId) => draft.entries[entryId])
+        .filter((entry): entry is Entry => Boolean(entry))
+        .map((entry) => structuredClone(entry));
+      prependTrashItem(draft,
+        {
+          id: createId("trash"),
+          deletedAt: Date.now(),
+          label: chapter.title,
+          payload: {
+            kind: "chapter",
+            chapters: [
+              {
+                chapter: structuredClone(target),
+                chapterIndex: Math.max(0, project?.chapterIds.indexOf(chapterId) ?? 0),
+              },
+            ],
+            entries: trashedEntries,
+          },
+        },
+      );
+
       for (const entryId of target.entryIds) {
         delete draft.entries[entryId];
       }
 
-      const project = draft.projects[target.projectId];
       if (project) {
         project.chapterIds = project.chapterIds.filter((id) => id !== chapterId);
       }
@@ -2845,6 +3387,7 @@ function App() {
         draft.activeChapterId = null;
       }
     });
+    setStorageStatus(`已將章節「${chapter.title}」移至回收站。`);
   }
 
   function deleteChaptersBatch(chapterIds: string[]): void {
@@ -2855,13 +3398,43 @@ function App() {
       return;
     }
     const confirmed = window.confirm(
-      `刪除已選 ${uniqueChapterIds.length} 個章節？其下史料會一併刪除。`,
+      `將已選 ${uniqueChapterIds.length} 個章節移至回收站？其下史料會一併移入。`,
     );
     if (!confirmed) {
       return;
     }
 
     mutateWorkspace((draft) => {
+      const trashedChapters = uniqueChapterIds
+        .map((chapterId) => {
+          const chapter = draft.chapters[chapterId];
+          const project = chapter ? draft.projects[chapter.projectId] : null;
+          return chapter
+            ? {
+                chapter: structuredClone(chapter),
+                chapterIndex: Math.max(0, project?.chapterIds.indexOf(chapterId) ?? 0),
+              }
+            : null;
+        })
+        .filter((item): item is { chapter: Chapter; chapterIndex: number } => Boolean(item));
+      const trashedEntries = trashedChapters
+        .flatMap(({ chapter }) => chapter.entryIds)
+        .map((entryId) => draft.entries[entryId])
+        .filter((entry): entry is Entry => Boolean(entry))
+        .map((entry) => structuredClone(entry));
+      prependTrashItem(draft,
+        {
+          id: createId("trash"),
+          deletedAt: Date.now(),
+          label: `${trashedChapters.length} 個章節`,
+          payload: {
+            kind: "chapter",
+            chapters: trashedChapters,
+            entries: trashedEntries,
+          },
+        },
+      );
+
       for (const chapterId of uniqueChapterIds) {
         const chapter = draft.chapters[chapterId];
         if (!chapter) {
@@ -2883,6 +3456,8 @@ function App() {
         draft.selectedEntryId = null;
       }
     });
+
+    setStorageStatus(`已將 ${uniqueChapterIds.length} 個章節移至回收站。`);
 
     setSelectedChapterIds((previous) => previous.filter((chapterId) => !uniqueChapterIds.includes(chapterId)));
     setSelectedEntryIds((previous) => previous.filter((entryId) => Boolean(workspace.entries[entryId])));
@@ -2909,6 +3484,11 @@ function App() {
         },
       };
     });
+  }
+
+  function syncSourceFormatState(): void {
+    const textarea = entrySourceTextareaRef.current;
+    setSourceFormatState(textarea ? resolveSourceFormatState(textarea) : EMPTY_SOURCE_FORMAT_STATE);
   }
 
   function applySourceMarker(marker: "bold" | "italic" | "underline"): void {
@@ -2956,6 +3536,7 @@ function App() {
       }
       input.focus();
       input.setSelectionRange(nextStart, nextEnd);
+      setSourceFormatState(resolveSourceFormatState(input));
     });
   }
 
@@ -2984,12 +3565,14 @@ function App() {
   }
 
   function createEntry(fallbackEntryId: string | null = null): void {
-    if (!activeProject) {
+    // 史料一律錄入章節之下；未選章節時不開新增彈窗。
+    if (!activeProject || !activeChapter) {
       return;
     }
 
-    const chapterId = activeChapter?.id ?? null;
+    const chapterId = activeChapter.id;
     const insertAfterEntryId = resolveEntryInsertAfterIdForCurrentScope(fallbackEntryId);
+    setSourceFormatState(EMPTY_SOURCE_FORMAT_STATE);
     setModalState({
       kind: "entry-create",
       projectId: activeProject.id,
@@ -3005,7 +3588,7 @@ function App() {
       return;
     }
 
-    const confirmed = window.confirm("刪除此條史料？");
+    const confirmed = window.confirm("將此條史料移至回收站？");
     if (!confirmed) {
       return;
     }
@@ -3016,16 +3599,27 @@ function App() {
         return;
       }
 
-      if (target.chapterId) {
-        const chapter = draft.chapters[target.chapterId];
-        if (chapter) {
-          chapter.entryIds = chapter.entryIds.filter((id) => id !== entryId);
-        }
-      } else {
-        const project = draft.projects[target.projectId];
-        if (project) {
-          project.entryIds = project.entryIds.filter((id) => id !== entryId);
-        }
+      const targetEntryIds = draft.chapters[target.chapterId]?.entryIds ?? [];
+      prependTrashItem(draft,
+        {
+          id: createId("trash"),
+          deletedAt: Date.now(),
+          label: formatEntryHeadline(target.timeText, target.summary),
+          payload: {
+            kind: "entry",
+            entries: [
+              {
+                entry: structuredClone(target),
+                entryIndex: Math.max(0, targetEntryIds.indexOf(entryId)),
+              },
+            ],
+          },
+        },
+      );
+
+      const chapter = draft.chapters[target.chapterId];
+      if (chapter) {
+        chapter.entryIds = chapter.entryIds.filter((id) => id !== entryId);
       }
 
       delete draft.entries[entryId];
@@ -3033,6 +3627,7 @@ function App() {
         draft.selectedEntryId = null;
       }
     });
+    setStorageStatus(`已將史料「${formatEntryHeadline(entry.timeText, entry.summary)}」移至回收站。`);
 
     setModalState((current) => {
       if (!current) {
@@ -3053,27 +3648,45 @@ function App() {
     if (uniqueEntryIds.length === 0) {
       return;
     }
-    const confirmed = window.confirm(`刪除已選 ${uniqueEntryIds.length} 條史料？`);
+    const confirmed = window.confirm(`將已選 ${uniqueEntryIds.length} 條史料移至回收站？`);
     if (!confirmed) {
       return;
     }
 
     mutateWorkspace((draft) => {
+      const trashedEntries = uniqueEntryIds
+        .map((entryId) => {
+          const entry = draft.entries[entryId];
+          if (!entry) {
+            return null;
+          }
+          const targetEntryIds = draft.chapters[entry.chapterId]?.entryIds ?? [];
+          return {
+            entry: structuredClone(entry),
+            entryIndex: Math.max(0, targetEntryIds.indexOf(entryId)),
+          };
+        })
+        .filter((item): item is { entry: Entry; entryIndex: number } => Boolean(item));
+      prependTrashItem(draft,
+        {
+          id: createId("trash"),
+          deletedAt: Date.now(),
+          label: `${trashedEntries.length} 條史料`,
+          payload: {
+            kind: "entry",
+            entries: trashedEntries,
+          },
+        },
+      );
+
       for (const entryId of uniqueEntryIds) {
         const entry = draft.entries[entryId];
         if (!entry) {
           continue;
         }
-        if (entry.chapterId) {
-          const chapter = draft.chapters[entry.chapterId];
-          if (chapter) {
-            chapter.entryIds = chapter.entryIds.filter((id) => id !== entryId);
-          }
-        } else {
-          const project = draft.projects[entry.projectId];
-          if (project) {
-            project.entryIds = project.entryIds.filter((id) => id !== entryId);
-          }
+        const chapter = draft.chapters[entry.chapterId];
+        if (chapter) {
+          chapter.entryIds = chapter.entryIds.filter((id) => id !== entryId);
         }
         delete draft.entries[entryId];
       }
@@ -3081,6 +3694,8 @@ function App() {
         draft.selectedEntryId = null;
       }
     });
+
+    setStorageStatus(`已將 ${uniqueEntryIds.length} 條史料移至回收站。`);
 
     setSelectedEntryIds((previous) => previous.filter((entryId) => !uniqueEntryIds.includes(entryId)));
     if (entrySelectionAnchorRef.current && uniqueEntryIds.includes(entrySelectionAnchorRef.current)) {
@@ -3098,6 +3713,211 @@ function App() {
       }
       return current;
     });
+  }
+
+  function trashRestoreBlockReason(item: TrashItem): string | null {
+    if (item.payload.kind === "project") {
+      return null;
+    }
+    if (item.payload.kind === "chapter") {
+      const missingProject = item.payload.chapters.find(
+        ({ chapter }) => !workspace.projects[chapter.projectId],
+      );
+      return missingProject ? "原專案已不存在，請先還原該專案。" : null;
+    }
+    const missingTarget = item.payload.entries.find(({ entry }) => {
+      if (!workspace.projects[entry.projectId]) {
+        return true;
+      }
+      return Boolean(entry.chapterId && !workspace.chapters[entry.chapterId]);
+    });
+    return missingTarget ? "原專案或章節已不存在，請先還原上層項目。" : null;
+  }
+
+  function restoreTrashItem(itemId: string): void {
+    const item = workspace.trash.find((candidate) => candidate.id === itemId);
+    if (!item) {
+      return;
+    }
+    const blockedReason = trashRestoreBlockReason(item);
+    if (blockedReason) {
+      setStorageStatus(`無法還原「${item.label}」：${blockedReason}`);
+      return;
+    }
+
+    mutateWorkspace((draft) => {
+      const current = draft.trash.find((candidate) => candidate.id === itemId);
+      if (!current) {
+        return;
+      }
+
+      if (current.payload.kind === "project") {
+        const payload = current.payload;
+        const projectId = draft.projects[payload.project.id] ? createId("project") : payload.project.id;
+        const chapterIdMap = new Map<string, string>();
+        const entryIdMap = new Map<string, string>();
+
+        for (const chapter of payload.chapters) {
+          chapterIdMap.set(
+            chapter.id,
+            draft.chapters[chapter.id] ? createId("chapter") : chapter.id,
+          );
+        }
+        for (const entry of payload.entries) {
+          entryIdMap.set(entry.id, draft.entries[entry.id] ? createId("entry") : entry.id);
+        }
+
+        const restoredProject: Project = {
+          ...structuredClone(payload.project),
+          id: projectId,
+          title: ensureUniqueProjectTitle(draft, payload.project.title),
+          chapterIds: payload.project.chapterIds
+            .map((chapterId) => chapterIdMap.get(chapterId))
+            .filter((chapterId): chapterId is string => Boolean(chapterId)),
+        };
+        draft.projects[projectId] = restoredProject;
+
+        for (const chapter of payload.chapters) {
+          const restoredChapterId = chapterIdMap.get(chapter.id);
+          if (!restoredChapterId) continue;
+          draft.chapters[restoredChapterId] = {
+            ...structuredClone(chapter),
+            id: restoredChapterId,
+            projectId,
+            entryIds: chapter.entryIds
+              .map((entryId) => entryIdMap.get(entryId))
+              .filter((entryId): entryId is string => Boolean(entryId)),
+          };
+        }
+        for (const entry of payload.entries) {
+          const restoredEntryId = entryIdMap.get(entry.id);
+          if (!restoredEntryId) continue;
+          // 舊回收站項目可能含無章節史料，一律還原進「未分章」修復章節。
+          const mappedChapterId = entry.chapterId ? chapterIdMap.get(entry.chapterId) ?? null : null;
+          const restoredChapterId = mappedChapterId ?? ensureRepairChapterId(draft, projectId);
+          draft.entries[restoredEntryId] = {
+            ...structuredClone(entry),
+            id: restoredEntryId,
+            projectId,
+            chapterId: restoredChapterId,
+          };
+          if (!mappedChapterId) {
+            draft.chapters[restoredChapterId].entryIds.push(restoredEntryId);
+          }
+        }
+
+        draft.projectOrder.splice(
+          Math.min(Math.max(0, payload.projectIndex), draft.projectOrder.length),
+          0,
+          projectId,
+        );
+        draft.activeProjectId = projectId;
+        draft.activeChapterId = restoredProject.chapterIds[0] ?? null;
+        draft.selectedEntryId = draft.activeChapterId
+          ? draft.chapters[draft.activeChapterId]?.entryIds[0] ?? null
+          : null;
+      } else if (current.payload.kind === "chapter") {
+        const payload = current.payload;
+        const chapterIdMap = new Map<string, string>();
+        const entryIdMap = new Map<string, string>();
+        for (const { chapter } of payload.chapters) {
+          chapterIdMap.set(
+            chapter.id,
+            draft.chapters[chapter.id] ? createId("chapter") : chapter.id,
+          );
+        }
+        for (const entry of payload.entries) {
+          entryIdMap.set(entry.id, draft.entries[entry.id] ? createId("entry") : entry.id);
+        }
+
+        const orderedChapters = [...payload.chapters].sort(
+          (a, b) => a.chapterIndex - b.chapterIndex,
+        );
+        for (const { chapter, chapterIndex } of orderedChapters) {
+          const project = draft.projects[chapter.projectId];
+          const restoredChapterId = chapterIdMap.get(chapter.id);
+          if (!project || !restoredChapterId) continue;
+          draft.chapters[restoredChapterId] = {
+            ...structuredClone(chapter),
+            id: restoredChapterId,
+            title: ensureUniqueChapterTitle(draft, project.id, chapter.title),
+            entryIds: chapter.entryIds
+              .map((entryId) => entryIdMap.get(entryId))
+              .filter((entryId): entryId is string => Boolean(entryId)),
+          };
+          project.chapterIds.splice(
+            Math.min(Math.max(0, chapterIndex), project.chapterIds.length),
+            0,
+            restoredChapterId,
+          );
+        }
+        for (const entry of payload.entries) {
+          const restoredEntryId = entryIdMap.get(entry.id);
+          const restoredChapterId = entry.chapterId ? chapterIdMap.get(entry.chapterId) : null;
+          if (!restoredEntryId || !restoredChapterId) continue;
+          draft.entries[restoredEntryId] = {
+            ...structuredClone(entry),
+            id: restoredEntryId,
+            chapterId: restoredChapterId,
+          };
+        }
+        const firstChapter = orderedChapters[0]?.chapter;
+        const firstRestoredChapterId = firstChapter ? chapterIdMap.get(firstChapter.id) ?? null : null;
+        if (firstChapter && firstRestoredChapterId) {
+          draft.activeProjectId = firstChapter.projectId;
+          draft.activeChapterId = firstRestoredChapterId;
+          draft.selectedEntryId = draft.chapters[firstRestoredChapterId]?.entryIds[0] ?? null;
+        }
+      } else {
+        const payload = current.payload;
+        const entryIdMap = new Map<string, string>();
+        for (const { entry } of payload.entries) {
+          entryIdMap.set(entry.id, draft.entries[entry.id] ? createId("entry") : entry.id);
+        }
+        const orderedEntries = [...payload.entries].sort((a, b) => a.entryIndex - b.entryIndex);
+        for (const { entry, entryIndex } of orderedEntries) {
+          const restoredEntryId = entryIdMap.get(entry.id);
+          if (!restoredEntryId) continue;
+          draft.entries[restoredEntryId] = { ...structuredClone(entry), id: restoredEntryId };
+          const targetEntryIds = draft.chapters[entry.chapterId]?.entryIds;
+          targetEntryIds?.splice(
+            Math.min(Math.max(0, entryIndex), targetEntryIds.length),
+            0,
+            restoredEntryId,
+          );
+        }
+        const firstEntry = orderedEntries[0]?.entry;
+        if (firstEntry) {
+          draft.activeProjectId = firstEntry.projectId;
+          draft.activeChapterId = firstEntry.chapterId;
+          draft.selectedEntryId = entryIdMap.get(firstEntry.id) ?? null;
+        }
+      }
+
+      draft.trash = draft.trash.filter((candidate) => candidate.id !== itemId);
+    });
+    setStorageStatus(`已從回收站還原「${item.label}」。`);
+  }
+
+  function permanentlyDeleteTrashItem(itemId: string): void {
+    const item = workspace.trash.find((candidate) => candidate.id === itemId);
+    if (!item || !window.confirm(`永久刪除「${item.label}」？此操作無法復原。`)) {
+      return;
+    }
+    mutateWorkspace((draft) => {
+      draft.trash = draft.trash.filter((candidate) => candidate.id !== itemId);
+    });
+    setStorageStatus(`已永久刪除「${item.label}」。`);
+  }
+
+  function emptyTrash(): void {
+    if (workspace.trash.length === 0 || !window.confirm("清空回收站？所有項目將永久刪除且無法復原。")) {
+      return;
+    }
+    mutateWorkspace((draft) => {
+      draft.trash = [];
+    });
+    setStorageStatus("回收站已清空。");
   }
 
   function onProjectDrop(targetProjectId: string): void {
@@ -3131,31 +3951,83 @@ function App() {
     clearDragState();
   }
 
+  function moveEntryToScope(
+    entryId: string,
+    targetProjectId: string,
+    targetChapterId: string,
+  ): void {
+    const entry = workspace.entries[entryId];
+    const targetProject = workspace.projects[targetProjectId];
+    const targetChapter = workspace.chapters[targetChapterId];
+    if (!entry || !targetProject || !targetChapter || targetChapter.projectId !== targetProjectId) {
+      clearDragState();
+      return;
+    }
+
+    if (entry.projectId === targetProjectId && entry.chapterId === targetChapterId) {
+      clearDragState();
+      return;
+    }
+
+    mutateWorkspace((draft) => {
+      const movedEntry = draft.entries[entryId];
+      const destinationProject = draft.projects[targetProjectId];
+      const destinationChapter = draft.chapters[targetChapterId];
+      if (
+        !movedEntry ||
+        !destinationProject ||
+        !destinationChapter ||
+        destinationChapter.projectId !== targetProjectId
+      ) {
+        return;
+      }
+
+      const sourceChapter = draft.chapters[movedEntry.chapterId];
+      if (sourceChapter) {
+        sourceChapter.entryIds = sourceChapter.entryIds.filter((id) => id !== entryId);
+      }
+
+      if (!destinationChapter.entryIds.includes(entryId)) {
+        destinationChapter.entryIds.push(entryId);
+      }
+
+      movedEntry.projectId = targetProjectId;
+      movedEntry.chapterId = targetChapterId;
+      draft.activeProjectId = targetProjectId;
+      draft.activeChapterId = targetChapterId;
+      draft.selectedEntryId = entryId;
+    });
+
+    setSelectedChapterIds([targetChapterId]);
+    setSelectedEntryIds([entryId]);
+    chapterSelectionAnchorRef.current = targetChapterId;
+    entrySelectionAnchorRef.current = entryId;
+    setCollapsedProjectIds((previous) => previous.filter((id) => id !== targetProjectId));
+    setExpandedChapterIds((previous) =>
+      previous.includes(targetChapterId) ? previous : [...previous, targetChapterId],
+    );
+    setNavigationScope("entry");
+    setStorageStatus("史料已移至章節。");
+    clearDragState();
+  }
+
   function onEntryDrop(targetEntryId: string): void {
     if (!dragPayload || dragPayload.type !== "entry" || !activeProject) {
       return;
     }
 
     const sameScope =
-      dragPayload.projectId === activeProject.id && dragPayload.chapterId === (activeChapter?.id ?? null);
-    if (!sameScope) {
+      dragPayload.projectId === activeProject.id && dragPayload.chapterId === activeChapter?.id;
+    if (!sameScope || !activeChapter) {
       return;
     }
 
     mutateWorkspace((draft) => {
-      if (activeChapter) {
-        const chapter = draft.chapters[activeChapter.id];
-        if (!chapter) {
-          return;
-        }
-        chapter.entryIds = reorderById(chapter.entryIds, dragPayload.id, targetEntryId);
-      } else {
-        const project = draft.projects[activeProject.id];
-        if (!project) {
-          return;
-        }
-        project.entryIds = reorderById(project.entryIds, dragPayload.id, targetEntryId);
+      const chapter = draft.chapters[activeChapter.id];
+      if (!chapter) {
+        return;
       }
+      chapter.entryIds = reorderById(chapter.entryIds, dragPayload.id, targetEntryId);
     });
 
     clearDragState();
@@ -3168,11 +4040,12 @@ function App() {
         ? activeChapter.id
         : workspace.projects[fallbackProjectId]?.chapterIds[0] ?? "";
 
+    activateOverlayModal("advanced");
     setAdvancedModal({
       open: true,
       query: globalQuery,
       queryScopes: DEFAULT_ADVANCED_QUERY_SCOPES,
-      tag: selectedTag,
+      tag: "",
       citationTitle: "",
       targetMode: "new-project",
       newProjectTitle: "按檢索結果分類",
@@ -3180,6 +4053,7 @@ function App() {
       existingProjectId: fallbackProjectId,
       existingChapterId: fallbackChapterId,
     });
+    setNavigationScope("advanced");
   }
 
   function collectEntryDraftsByResults(results: SearchResult[]): EntryDraft[] {
@@ -3213,21 +4087,31 @@ function App() {
           id: projectId,
           title,
           chapterIds: [],
-          entryIds: [],
           createdAt: Date.now(),
         };
         draft.projectOrder.push(projectId);
 
+        // 史料一律落在章節之下，新專案同時建立承載章節。
+        const chapterId = createId("chapter");
+        draft.chapters[chapterId] = {
+          id: chapterId,
+          projectId,
+          title: advancedModal.newChapterTitle.trim() || "檢索結果",
+          entryIds: [],
+          createdAt: Date.now(),
+        };
+        draft.projects[projectId].chapterIds.push(chapterId);
+
         let firstEntryId: string | null = null;
         for (const item of drafts) {
-          const entryId = appendEntryDraft(draft, projectId, null, item);
+          const entryId = appendEntryDraft(draft, projectId, chapterId, item);
           if (!firstEntryId) {
             firstEntryId = entryId;
           }
         }
 
         draft.activeProjectId = projectId;
-        draft.activeChapterId = null;
+        draft.activeChapterId = chapterId;
         draft.selectedEntryId = firstEntryId;
       });
 
@@ -3268,31 +4152,6 @@ function App() {
 
         draft.activeProjectId = targetProjectId;
         draft.activeChapterId = chapterId;
-        draft.selectedEntryId = firstEntryId;
-      });
-
-      setAdvancedModal((state) => ({ ...state, open: false }));
-      return;
-    }
-
-    if (advancedModal.targetMode === "existing-project") {
-      const targetProjectId = advancedModal.existingProjectId;
-      if (!workspace.projects[targetProjectId]) {
-        window.alert("請先選擇目標專案。");
-        return;
-      }
-
-      mutateWorkspace((draft) => {
-        let firstEntryId: string | null = null;
-        for (const item of drafts) {
-          const entryId = appendEntryDraft(draft, targetProjectId, null, item);
-          if (!firstEntryId) {
-            firstEntryId = entryId;
-          }
-        }
-
-        draft.activeProjectId = targetProjectId;
-        draft.activeChapterId = null;
         draft.selectedEntryId = firstEntryId;
       });
 
@@ -3391,7 +4250,6 @@ function App() {
         id: projectId,
         title,
         chapterIds: [],
-        entryIds: [],
         createdAt: Date.now(),
       };
       draft.projectOrder.push(projectId);
@@ -3522,8 +4380,246 @@ function App() {
 
   function openStorageModal(): void {
     setStorageStatus("");
+    setStorageSaveAsModalOpen(false);
+    setStorageFormatInfoModalOpen(false);
     setStorageModalOpen(true);
     void refreshStorageInfo();
+  }
+
+  function closeStorageModal(): void {
+    setStorageModalOpen(false);
+    setStorageSaveAsModalOpen(false);
+    setStorageFormatInfoModalOpen(false);
+  }
+
+  function buildWorkspaceForSave(scope: "active" | "all"): WorkspaceData | null {
+    if (scope === "all") {
+      return cleanupWorkspace(workspace);
+    }
+
+    if (!activeProject) {
+      return null;
+    }
+
+    const project = workspace.projects[activeProject.id];
+    if (!project) {
+      return null;
+    }
+
+    const next: WorkspaceData = {
+      schemaVersion: WORKSPACE_SCHEMA_VERSION,
+      revision: workspace.revision,
+      projectOrder: [project.id],
+      projects: {
+        [project.id]: structuredClone(project),
+      },
+      chapters: {},
+      entries: {},
+      trash: [],
+      activeProjectId: project.id,
+      activeChapterId: null,
+      selectedEntryId: null,
+    };
+
+    for (const chapterId of project.chapterIds) {
+      const chapter = workspace.chapters[chapterId];
+      if (!chapter || chapter.projectId !== project.id) {
+        continue;
+      }
+      next.chapters[chapterId] = structuredClone(chapter);
+    }
+
+    const entryIds = new Set<string>();
+    for (const chapter of Object.values(next.chapters)) {
+      for (const entryId of chapter.entryIds) {
+        entryIds.add(entryId);
+      }
+    }
+
+    for (const entryId of entryIds) {
+      const entry = workspace.entries[entryId];
+      if (!entry || entry.projectId !== project.id) {
+        continue;
+      }
+      next.entries[entryId] = structuredClone(entry);
+    }
+
+    if (workspace.activeChapterId && next.chapters[workspace.activeChapterId]) {
+      next.activeChapterId = workspace.activeChapterId;
+    }
+    if (workspace.selectedEntryId && next.entries[workspace.selectedEntryId]) {
+      next.selectedEntryId = workspace.selectedEntryId;
+    }
+
+    return cleanupWorkspace(next);
+  }
+
+  async function backupWorkspaceToFile(scope: "active" | "all"): Promise<void> {
+    if (!window.workspaceBridge?.exportWorkspaceFile) {
+      setStorageStatus("目前版本不支持備份到。");
+      return;
+    }
+
+    const payload = buildWorkspaceForSave(scope);
+    if (!payload) {
+      setStorageStatus("找不到可備份的專案。");
+      return;
+    }
+
+    const timestamp = new Date();
+    const backupStamp = `${timestamp.getFullYear()}${String(timestamp.getMonth() + 1).padStart(2, "0")}${String(
+      timestamp.getDate(),
+    ).padStart(2, "0")}-${String(timestamp.getHours()).padStart(2, "0")}${String(
+      timestamp.getMinutes(),
+    ).padStart(2, "0")}${String(timestamp.getSeconds()).padStart(2, "0")}`;
+    const suggestedFileName =
+      scope === "all"
+        ? `長編工作臺-全部專案-備份-${backupStamp}.json`
+        : `長編工作臺-${sanitizeFileNameSegment(activeProject?.title || "當前專案") || "當前專案"}-備份-${backupStamp}.json`;
+
+    setStorageBusy(true);
+    setStorageStatus("");
+    try {
+      const result = await window.workspaceBridge.exportWorkspaceFile(payload, suggestedFileName);
+      if (!result.ok) {
+        if (result.canceled) {
+          setStorageStatus("已取消備份。");
+        } else {
+          setStorageStatus(result.error || "備份失敗。");
+        }
+        return;
+      }
+
+      setStorageSaveAsModalOpen(false);
+      setStorageStatus(`已備份到：${result.path ?? suggestedFileName}`);
+    } catch {
+      setStorageStatus("備份檔案時發生錯誤。");
+    } finally {
+      setStorageBusy(false);
+    }
+  }
+
+  function mergeImportedWorkspace(
+    current: WorkspaceData,
+    importedRaw: WorkspaceData,
+  ): { workspace: WorkspaceData; addedProjects: number; addedEntries: number } {
+    const imported = cleanupWorkspace(importedRaw);
+    const next = structuredClone(current);
+    let addedProjects = 0;
+    let addedEntries = 0;
+
+    for (const importedProjectId of imported.projectOrder) {
+      const importedProject = imported.projects[importedProjectId];
+      if (!importedProject) {
+        continue;
+      }
+
+      const nextProjectId = createId("project");
+      const nextProjectTitle = ensureUniqueProjectTitle(next, importedProject.title || "匯入專案");
+      next.projects[nextProjectId] = {
+        id: nextProjectId,
+        title: nextProjectTitle,
+        chapterIds: [],
+        createdAt: Date.now(),
+      };
+      next.projectOrder.push(nextProjectId);
+      addedProjects += 1;
+
+      for (const importedChapterId of importedProject.chapterIds) {
+        const importedChapter = imported.chapters[importedChapterId];
+        if (!importedChapter || importedChapter.projectId !== importedProjectId) {
+          continue;
+        }
+
+        const nextChapterId = createId("chapter");
+        const nextChapterTitle = ensureUniqueChapterTitle(
+          next,
+          nextProjectId,
+          importedChapter.title || "新章節",
+        );
+        next.chapters[nextChapterId] = {
+          id: nextChapterId,
+          projectId: nextProjectId,
+          title: nextChapterTitle,
+          entryIds: [],
+          createdAt: Date.now(),
+        };
+        next.projects[nextProjectId].chapterIds.push(nextChapterId);
+
+        for (const importedEntryId of importedChapter.entryIds) {
+          const importedEntry = imported.entries[importedEntryId];
+          if (!importedEntry || importedEntry.projectId !== importedProjectId || importedEntry.chapterId !== importedChapterId) {
+            continue;
+          }
+          const nextEntryId = createId("entry");
+          next.entries[nextEntryId] = {
+            ...importedEntry,
+            id: nextEntryId,
+            projectId: nextProjectId,
+            chapterId: nextChapterId,
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+          };
+          next.chapters[nextChapterId].entryIds.push(nextEntryId);
+          addedEntries += 1;
+        }
+      }
+    }
+
+    return {
+      workspace: cleanupWorkspace(next),
+      addedProjects,
+      addedEntries,
+    };
+  }
+
+  async function importWorkspaceFromFile(): Promise<void> {
+    if (!window.workspaceBridge?.importWorkspaceFile) {
+      setStorageStatus("目前版本不支持匯入檔案。");
+      return;
+    }
+
+    setStorageBusy(true);
+    setStorageStatus("");
+    try {
+      const result = await window.workspaceBridge.importWorkspaceFile();
+      if (!result.ok) {
+        if (result.canceled) {
+          setStorageStatus("已取消匯入。");
+        } else {
+          setStorageStatus(result.error || "匯入失敗。");
+        }
+        return;
+      }
+
+      if (!result.data || typeof result.data !== "object") {
+        setStorageStatus("匯入失敗：檔案內容不是有效工作臺資料。");
+        return;
+      }
+
+      const shouldMerge = window.confirm(
+        "匯入會把檔案內容加入目前工作臺，不會覆蓋或刪除現有資料。是否繼續？",
+      );
+      if (!shouldMerge) {
+        setStorageStatus("已取消匯入。");
+        return;
+      }
+
+      const { workspace: mergedWorkspace, addedProjects, addedEntries } = mergeImportedWorkspace(
+        workspace,
+        result.data as WorkspaceData,
+      );
+      setWorkspace(mergedWorkspace);
+      setStorageStatus(
+        `已匯入並加入：${addedProjects} 個專案、${addedEntries} 條史料（來源：${result.path ?? "未命名檔案"}）。`,
+      );
+      setStorageSaveAsModalOpen(false);
+      setStorageFormatInfoModalOpen(false);
+    } catch {
+      setStorageStatus("匯入檔案時發生錯誤。");
+    } finally {
+      setStorageBusy(false);
+    }
   }
 
   async function chooseStoragePath(): Promise<void> {
@@ -3564,6 +4660,10 @@ function App() {
         return;
       }
 
+      if (Number.isInteger(result.revision)) {
+        sharedRevisionRef.current = result.revision ?? sharedRevisionRef.current;
+      }
+      lastPersistedSignatureRef.current = workspaceContentSignature(workspace);
       setStorageStatus(`已切換資料位置：${result.path ?? nextPath}`);
       await refreshStorageInfo();
     } catch {
@@ -3588,6 +4688,10 @@ function App() {
         return;
       }
 
+      if (Number.isInteger(result.revision)) {
+        sharedRevisionRef.current = result.revision ?? sharedRevisionRef.current;
+      }
+      lastPersistedSignatureRef.current = workspaceContentSignature(workspace);
       setStorageStatus(`已恢復預設資料位置：${result.path ?? ""}`);
       await refreshStorageInfo();
     } catch {
@@ -3606,13 +4710,21 @@ function App() {
     setStorageBusy(true);
     setStorageStatus("");
     try {
-      const raw = await window.workspaceBridge.loadSharedWorkspace();
-      if (!raw || typeof raw !== "object") {
+      const result = await window.workspaceBridge.loadSharedWorkspace();
+      if (!result.ok) {
+        setStorageStatus(result.error || "重新載入資料失敗。");
+        return;
+      }
+      if (!result.workspace || typeof result.workspace !== "object") {
         setStorageStatus("當前資料檔尚無可載入資料。");
         return;
       }
 
-      setWorkspace(cleanupWorkspace(raw as WorkspaceData));
+      const next = cleanupWorkspace(result.workspace as WorkspaceData);
+      sharedRevisionRef.current = result.revision ?? next.revision;
+      lastPersistedSignatureRef.current = workspaceContentSignature(next);
+      workspaceRef.current = next;
+      setWorkspace(next);
       setStorageStatus("已從資料檔重新載入。");
     } catch {
       setStorageStatus("重新載入資料失敗。");
@@ -3624,10 +4736,21 @@ function App() {
   async function exportWord(): Promise<void> {
     setIsExportingDocx(true);
     try {
+      const { exportAsDocx } = await import("./exporters");
       await exportAsDocx(workspace, exportScope);
     } finally {
       setIsExportingDocx(false);
     }
+  }
+
+  async function exportText(): Promise<void> {
+    const { exportAsTxt } = await import("./exporters");
+    exportAsTxt(workspace, exportScope);
+  }
+
+  async function exportExcel(): Promise<void> {
+    const { exportAsXlsx } = await import("./exporters");
+    exportAsXlsx(workspace, exportScope);
   }
 
   const desktopMeta = window.desktopMeta;
@@ -3647,6 +4770,119 @@ function App() {
   const viewedEntry = entryViewModal ? workspace.entries[entryViewModal.entryId] ?? null : null;
   const viewedEntryDraft = entryViewModal ? entryViewModal.draft : null;
   const entryViewHighlightQuery = entryViewModal?.highlightQuery?.trim() ?? "";
+  const modalOpenState: Record<OverlayModalKey, boolean> = {
+    storage: storageModalOpen,
+    trash: trashModalOpen,
+    "storage-save-as": storageSaveAsModalOpen,
+    "storage-format-info": storageFormatInfoModalOpen,
+    form: Boolean(formModal),
+    "entry-view": Boolean(entryViewModal),
+    "entry-form": Boolean(entryModal),
+    advanced: advancedModal.open,
+    "merge-project": mergeModal.open,
+    "merge-chapter": chapterMergeModal.open,
+  };
+  const anyOverlayModalOpen = OVERLAY_MODAL_KEYS.some((key) => modalOpenState[key]);
+  const openModalSignature = OVERLAY_MODAL_KEYS.filter((key) => modalOpenState[key]).join("|");
+  const showGlobalStorageAlert = Boolean(
+    storageStatus && /失敗|衝突|外部|未儲存|拒絕|覆蓋/.test(storageStatus),
+  );
+
+  useEffect(() => {
+    const previous = modalOpenStateRef.current;
+    const openedKeys = OVERLAY_MODAL_KEYS.filter((key) => modalOpenState[key] && !previous[key]);
+    modalOpenStateRef.current = { ...modalOpenState };
+    if (openedKeys.length === 0) {
+      return;
+    }
+    setModalOrders((previousOrders) => {
+      const nextOrders = { ...previousOrders };
+      for (const key of openedKeys) {
+        modalOrderCounterRef.current += 1;
+        nextOrders[key] = modalOrderCounterRef.current;
+      }
+      return nextOrders;
+    });
+  }, [
+    advancedModal.open,
+    chapterMergeModal.open,
+    Boolean(entryModal),
+    Boolean(entryViewModal),
+    Boolean(formModal),
+    mergeModal.open,
+    storageFormatInfoModalOpen,
+    storageSaveAsModalOpen,
+    storageModalOpen,
+    trashModalOpen,
+  ]);
+
+  useEffect(() => {
+    const appShell = document.querySelector<HTMLElement>(".app-shell");
+    if (!anyOverlayModalOpen) {
+      appShell?.removeAttribute("inert");
+      const previous = previousFocusedElementRef.current;
+      previousFocusedElementRef.current = null;
+      previous?.focus();
+      return undefined;
+    }
+
+    if (!previousFocusedElementRef.current && document.activeElement instanceof HTMLElement) {
+      previousFocusedElementRef.current = document.activeElement;
+    }
+    appShell?.setAttribute("inert", "");
+
+    const getTopModal = (): HTMLElement | null => {
+      const cards = Array.from(document.querySelectorAll<HTMLElement>(".modal-card"));
+      return cards.reduce<HTMLElement | null>((top, card) => {
+        if (!top) return card;
+        const cardZ = Number(window.getComputedStyle(card.parentElement ?? card).zIndex) || 0;
+        const topZ = Number(window.getComputedStyle(top.parentElement ?? top).zIndex) || 0;
+        return cardZ >= topZ ? card : top;
+      }, null);
+    };
+
+    const frame = window.requestAnimationFrame(() => {
+      const modal = getTopModal();
+      if (!modal) return;
+      modal.setAttribute("role", "dialog");
+      modal.setAttribute("aria-modal", "true");
+      modal.tabIndex = -1;
+      const focusable = modal.querySelector<HTMLElement>(
+        'input:not([disabled]), textarea:not([disabled]), select:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+      );
+      (focusable ?? modal).focus();
+    });
+
+    const trapFocus = (event: KeyboardEvent) => {
+      if (event.key !== "Tab") return;
+      const modal = getTopModal();
+      if (!modal) return;
+      const focusable = Array.from(
+        modal.querySelectorAll<HTMLElement>(
+          'input:not([disabled]), textarea:not([disabled]), select:not([disabled]), button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ),
+      ).filter((element) => element.offsetParent !== null);
+      if (focusable.length === 0) {
+        event.preventDefault();
+        modal.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", trapFocus);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.removeEventListener("keydown", trapFocus);
+    };
+  }, [anyOverlayModalOpen, openModalSignature]);
 
   return (
     <>
@@ -3661,49 +4897,158 @@ function App() {
 
         <aside className="left-pane panel">
           <div className="pane-head">
-            <h1>長編工作臺</h1>
+            <div className="pane-title-row">
+              <h1>長編工作臺</h1>
+              <span
+                className={`save-state save-state-${saveState}`}
+                role="status"
+                aria-live="polite"
+                title={storageStatus || SAVE_STATE_LABEL[saveState]}
+              >
+                <span className="save-state-dot" aria-hidden="true" />
+                {SAVE_STATE_LABEL[saveState]}
+              </span>
+            </div>
             <p className="meta-text">
               {desktopMeta?.isDesktop ? `桌面模式 · ${desktopMeta.platform}` : "瀏覽器模式"}
             </p>
           </div>
 
-          <button className="primary-btn" onClick={beginCreateProject}>
-            + 新增專案
-          </button>
+          <div className="workspace-action-bar">
+            <button className="primary-btn" onClick={() => beginCreateProject()}>
+              + 新增專案
+            </button>
+            <div ref={workspaceMenuRef} className="workspace-menu-wrap">
+              <button
+                type="button"
+                className="ghost-btn overflow-btn"
+                aria-label="更多工作臺操作"
+                aria-controls="workspace-actions-menu"
+                aria-expanded={workspaceMenuOpen}
+                onClick={() => setWorkspaceMenuOpen((open) => !open)}
+              >
+                ⋯
+              </button>
+              {workspaceMenuOpen && (
+                <div
+                  id="workspace-actions-menu"
+                  className="workspace-menu"
+                  role="group"
+                  aria-label="工作臺操作"
+                >
+                  <p className="workspace-menu-label">貼上與合併</p>
+                  <button
+                    className="workspace-menu-item"
+                    disabled={clipboard?.kind !== "project"}
+                    onClick={() => {
+                      pasteProjectFromClipboard();
+                      setWorkspaceMenuOpen(false);
+                    }}
+                  >
+                    粘貼專案
+                  </button>
+                  <button
+                    className="workspace-menu-item"
+                    disabled={!activeProject || clipboard?.kind !== "chapter"}
+                    onClick={() => {
+                      pasteChapterFromToolbar();
+                      setWorkspaceMenuOpen(false);
+                    }}
+                  >
+                    粘貼章節
+                  </button>
+                  <button
+                    className="workspace-menu-item"
+                    onClick={() => {
+                      openMergeModal();
+                      setWorkspaceMenuOpen(false);
+                    }}
+                  >
+                    合併專案
+                  </button>
+                  <button
+                    className="workspace-menu-item"
+                    disabled={Object.keys(workspace.chapters).length < 2}
+                    onClick={() => {
+                      openChapterMergeModal();
+                      setWorkspaceMenuOpen(false);
+                    }}
+                  >
+                    合併章節
+                  </button>
 
-          <div className="tool-row">
-            <button
-              className="ghost-btn"
-              disabled={clipboard?.kind !== "project"}
-              onClick={() => pasteProjectFromClipboard()}
-            >
-              粘貼專案
-            </button>
-            <button
-              className="ghost-btn"
-              disabled={!activeProject || clipboard?.kind !== "chapter"}
-              onClick={pasteChapterFromToolbar}
-            >
-              粘貼章節
-            </button>
+                  <div className="workspace-menu-divider" />
+                  <button
+                    className="workspace-menu-item"
+                    onClick={() => {
+                      openStorageModal();
+                      setWorkspaceMenuOpen(false);
+                    }}
+                  >
+                    檔案資料管理
+                  </button>
+                  <button
+                    className="workspace-menu-item workspace-trash-menu-item"
+                    onClick={() => {
+                      activateOverlayModal("trash");
+                      setTrashModalOpen(true);
+                      setWorkspaceMenuOpen(false);
+                    }}
+                  >
+                    <span>回收站</span>
+                    <span className="menu-count-badge">{workspace.trash.length}</span>
+                  </button>
+
+                  <div className="workspace-menu-divider" />
+                  <p className="workspace-menu-label">匯出</p>
+                  <div className="scope-switch compact-scope-switch" aria-label="匯出範圍">
+                    <button
+                      className={exportScope === "active" ? "scope active" : "scope"}
+                      onClick={() => setExportScope("active")}
+                    >
+                      當前專案
+                    </button>
+                    <button
+                      className={exportScope === "all" ? "scope active" : "scope"}
+                      onClick={() => setExportScope("all")}
+                    >
+                      全部專案
+                    </button>
+                  </div>
+                  <div className="workspace-export-actions">
+                    <button
+                      className="workspace-menu-item"
+                      onClick={() => {
+                        setWorkspaceMenuOpen(false);
+                        void exportText();
+                      }}
+                    >
+                      匯出 TXT
+                    </button>
+                    <button
+                      className="workspace-menu-item"
+                      disabled={isExportingDocx}
+                      onClick={() => {
+                        setWorkspaceMenuOpen(false);
+                        void exportWord();
+                      }}
+                    >
+                      {isExportingDocx ? "匯出中…" : "匯出 Word"}
+                    </button>
+                    <button
+                      className="workspace-menu-item"
+                      onClick={() => {
+                        setWorkspaceMenuOpen(false);
+                        void exportExcel();
+                      }}
+                    >
+                      匯出 Excel
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
-
-          <div className="tool-row">
-            <button className="ghost-btn" onClick={openMergeModal}>
-              合併專案
-            </button>
-            <button
-              className="ghost-btn"
-              disabled={Object.keys(workspace.chapters).length < 2}
-              onClick={openChapterMergeModal}
-            >
-              合併章節
-            </button>
-          </div>
-
-          <button className="ghost-btn" onClick={openStorageModal}>
-            檔案資料管理
-          </button>
 
           <div ref={leftPaneScrollRef} className="sidebar-scroll">
             {workspace.projectOrder.map((projectId) => {
@@ -3712,14 +5057,13 @@ function App() {
                 return null;
               }
 
-              const entryCount =
-                project.entryIds.length +
-                project.chapterIds.reduce((sum, chapterId) => {
-                  const chapter = workspace.chapters[chapterId];
-                  return sum + (chapter?.entryIds.length ?? 0);
-                }, 0);
+              const entryCount = project.chapterIds.reduce((sum, chapterId) => {
+                const chapter = workspace.chapters[chapterId];
+                return sum + (chapter?.entryIds.length ?? 0);
+              }, 0);
 
-              const isProjectActive = activeProject?.id === project.id && !activeChapter;
+              const isProjectActive = activeProject?.id === project.id;
+              const isProjectCollapsed = collapsedProjectIds.includes(project.id);
               const projectDropKey = `project:${project.id}`;
               const projectDragKey = `project:${project.id}`;
 
@@ -3737,8 +5081,19 @@ function App() {
                         setDropTargetKey(projectDropKey);
                       }
                     }}
-                    onDrop={() => onProjectDrop(project.id)}
+                    onDrop={() => {
+                      onProjectDrop(project.id);
+                    }}
                   >
+                    <button
+                      type="button"
+                      className="tree-toggle"
+                      aria-label={isProjectCollapsed ? `展開專案「${project.title}」` : `摺疊專案「${project.title}」`}
+                      aria-expanded={!isProjectCollapsed}
+                      onClick={() => toggleProjectCollapsed(project.id)}
+                    >
+                      <span aria-hidden="true">{isProjectCollapsed ? "▸" : "▾"}</span>
+                    </button>
                     <span
                       className={`drag-handle ${draggingKey === projectDragKey ? "dragging" : ""}`}
                       draggable
@@ -3755,16 +5110,17 @@ function App() {
                     <button
                       className="project-main"
                       data-project-id={project.id}
-                      onClick={() => selectProject(project.id)}
+                      aria-expanded={!isProjectCollapsed}
+                      onClick={() => toggleProjectCollapsed(project.id)}
                       onContextMenu={(event) => openProjectContextMenu(event, project.id)}
-                      title="右鍵可編輯專案名"
+                      title={`${isProjectCollapsed ? "展開" : "摺疊"}專案；右鍵可編輯專案名`}
                     >
                       <span className="project-title">{project.title}</span>
                       <span className="badge">{entryCount}</span>
                     </button>
                   </div>
 
-                  <div className="chapter-stack">
+                  {!isProjectCollapsed && <div className="chapter-stack">
                     {project.chapterIds.map((chapterId) => {
                       const chapter = workspace.chapters[chapterId];
                       if (!chapter) {
@@ -3773,25 +5129,42 @@ function App() {
 
                       const isChapterActive =
                         activeChapter?.id === chapter.id || selectedChapterIdSet.has(chapter.id);
+                      const isChapterExpanded = expandedChapterIds.includes(chapter.id);
                       const chapterDropKey = `chapter:${chapter.id}`;
                       const chapterDragKey = `chapter:${chapter.id}`;
 
                       return (
+                        <div key={chapter.id} className="chapter-branch">
                         <div
-                          key={chapter.id}
                           className={`chapter-row ${isChapterActive ? "active" : ""} ${dropTargetKey === chapterDropKey ? "drop-target" : ""}`}
                           onDragOver={(event) => {
-                            if (
+                            const canReorderChapter =
                               dragPayload?.type === "chapter" &&
-                              dragPayload.projectId === project.id
-                            ) {
+                              dragPayload.projectId === project.id;
+                            if (canReorderChapter || dragPayload?.type === "entry") {
                               event.preventDefault();
                               configureMoveDrag(event);
                               setDropTargetKey(chapterDropKey);
                             }
                           }}
-                          onDrop={() => onChapterDrop(project.id, chapter.id)}
+                          onDrop={() => {
+                            if (dragPayload?.type === "entry") {
+                              moveEntryToScope(dragPayload.id, project.id, chapter.id);
+                            } else {
+                              onChapterDrop(project.id, chapter.id);
+                            }
+                          }}
                         >
+                          <button
+                            type="button"
+                            className="tree-toggle tree-toggle-small"
+                            aria-label={isChapterExpanded ? `摺疊章節「${chapter.title}」` : `展開章節「${chapter.title}」`}
+                            aria-expanded={isChapterExpanded}
+                            onClick={() => toggleChapterExpanded(chapter.id)}
+                            disabled={chapter.entryIds.length === 0}
+                          >
+                            <span aria-hidden="true">{isChapterExpanded ? "▾" : "▸"}</span>
+                          </button>
                           <span
                             className={`drag-handle ${draggingKey === chapterDragKey ? "dragging" : ""}`}
                             draggable
@@ -3816,13 +5189,50 @@ function App() {
                             <span className="badge">{chapter.entryIds.length}</span>
                           </button>
                         </div>
+                        {isChapterExpanded && chapter.entryIds.length > 0 && (
+                          <div className="chapter-entry-list">
+                            {chapter.entryIds.map((entryId) => {
+                              const entry = workspace.entries[entryId];
+                              if (!entry) {
+                                return null;
+                              }
+                              const entryDragKey = `tree-entry:${entry.id}`;
+                              return (
+                                <button
+                                  type="button"
+                                  key={`tree-entry-${entry.id}`}
+                                  className={`tree-entry ${workspace.selectedEntryId === entry.id ? "active" : ""}`}
+                                  title={formatEntryHeadline(entry.timeText, entry.summary)}
+                                  draggable
+                                  onDragStart={(event) => {
+                                    configureMoveDrag(event);
+                                    setDragPayload({
+                                      type: "entry",
+                                      id: entry.id,
+                                      projectId: entry.projectId,
+                                      chapterId: entry.chapterId,
+                                    });
+                                    setDraggingKey(entryDragKey);
+                                  }}
+                                  onDragEnd={clearDragState}
+                                  onContextMenu={(event) => openEntryContextMenu(event, entry.id)}
+                                  onClick={() => selectEntryFromTree(entry.id)}
+                                >
+                                  <span className="tree-entry-bullet" aria-hidden="true" />
+                                  <span>{formatEntryHeadline(entry.timeText, entry.summary)}</span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        )}
+                        </div>
                       );
                     })}
 
                     <button className="ghost-btn" onClick={() => beginCreateChapter(project.id)}>
                       + 新增章節
                     </button>
-                  </div>
+                  </div>}
                 </section>
               );
             })}
@@ -3835,15 +5245,16 @@ function App() {
               <p className="eyebrow">當前專案</p>
               <h2>{activeProject?.title ?? "未選擇專案"}</h2>
               <p className="meta-text">
-                {activeChapter ? `章節：${activeChapter.title}` : "未分章史料區"}
+                {activeChapter ? `章節：${activeChapter.title}` : "尚未選擇章節"}
               </p>
             </div>
             <div className="head-actions">
               <button
                 className="secondary-btn"
                 data-keep-entry-selection="true"
-                onClick={createEntry}
-                disabled={!activeProject}
+                onClick={() => createEntry()}
+                disabled={!activeProject || !activeChapter}
+                title={activeChapter ? "在當前章節新增史料" : "請先選擇章節"}
               >
                 + 新增史料
               </button>
@@ -3866,8 +5277,13 @@ function App() {
             {currentEntries.length === 0 ? (
               <div className="empty-state">
                 <h3>尚無史料</h3>
-                <p>可先建立章節或直接在當前層級新增史料。</p>
-                <button className="secondary-btn" onClick={createEntry} disabled={!activeProject}>
+                <p>{activeChapter ? "可在當前章節新增史料。" : "請先建立或選擇章節，再新增史料。"}</p>
+                <button
+                  className="secondary-btn"
+                  onClick={() => createEntry()}
+                  disabled={!activeProject || !activeChapter}
+                  title={activeChapter ? "在當前章節新增史料" : "請先選擇章節"}
+                >
                   立即新增
                 </button>
               </div>
@@ -4033,28 +5449,47 @@ function App() {
         <aside ref={rightPaneScrollRef} className="right-pane panel">
           <section className="search-panel">
             <div className="search-head">
-              <p className="eyebrow">全局檢索</p>
-              <p className="meta-text">支持繁簡檢索 + #標籤過濾</p>
+              <p className="eyebrow">
+                {searchLocationScope === "global"
+                  ? "全局檢索"
+                  : searchLocationScope === "project"
+                    ? "在專案內檢索"
+                    : "在章節中檢索"}
+              </p>
+              <p className="meta-text">
+                {searchLocationScope === "global"
+                  ? "支持繁簡檢索"
+                  : searchLocationScope === "project"
+                    ? activeProject?.title || "尚未選擇專案"
+                    : activeChapter?.title || "尚未選擇章節"}
+              </p>
             </div>
 
             <input
+              id="global-search-input"
               className="search-input"
               placeholder="檢索時間、摘要、史料文本、備註、引文註釋..."
               value={globalQuery}
+              onFocus={() => setNavigationScope("search")}
               onChange={(event) => setGlobalQuery(event.target.value)}
             />
 
             <select
               className="search-input"
-              value={selectedTag}
-              onChange={(event) => setSelectedTag(event.target.value)}
+              aria-label="檢索範圍"
+              value={searchLocationScope}
+              onFocus={() => setNavigationScope("search")}
+              onChange={(event) =>
+                setSearchLocationScope(event.target.value as SearchLocationScope)
+              }
             >
-              <option value="">全部標籤（{allTags.length}）</option>
-              {allTags.map((tag) => (
-                <option key={tag} value={tag}>
-                  {tag}
-                </option>
-              ))}
+              <option value="global">全局檢索</option>
+              <option value="project" disabled={!activeProject}>
+                在專案內檢索
+              </option>
+              <option value="chapter" disabled={!activeChapter}>
+                在章節中檢索
+              </option>
             </select>
 
             <button className="ghost-btn advanced-launch" onClick={openAdvancedSearchModal}>
@@ -4064,10 +5499,11 @@ function App() {
             <div
               ref={searchResultsRef}
               className="search-results"
+              onMouseDown={() => setNavigationScope("search")}
               onScroll={(event) => setSearchResultsScrollTop(event.currentTarget.scrollTop)}
             >
               <p className="result-meta">
-                {hasSearch ? `共 ${searchResults.length} 條結果` : "請輸入關鍵詞或選擇標籤開始檢索"}
+                {hasSearch ? `共 ${searchResults.length} 條結果` : "請輸入關鍵詞開始檢索"}
               </p>
               {isSearchPending && hasSearch && <p className="meta-text">檢索中...</p>}
               {hasSearch ? (
@@ -4094,10 +5530,15 @@ function App() {
                     return (
                       <button
                         key={result.entryId}
-                        className="search-item virtualized-row"
-                        onClick={() => jumpToSearchResult(result, searchHighlightQuery)}
+                        data-search-entry-id={result.entryId}
+                        className={`search-item virtualized-row ${selectedSearchResultEntryId === result.entryId ? "selected" : ""}`}
+                        onClick={() => {
+                          setSelectedSearchResultEntryId(result.entryId);
+                          jumpToSearchResult(result, searchHighlightQuery, "search");
+                        }}
                         onDoubleClick={() => {
-                          jumpToSearchResult(result, searchHighlightQuery);
+                          setSelectedSearchResultEntryId(result.entryId);
+                          jumpToSearchResult(result, searchHighlightQuery, "search");
                           beginViewEntry(result.entryId, searchHighlightQuery);
                         }}
                       >
@@ -4160,37 +5601,12 @@ function App() {
             </div>
           </section>
 
-          <section className="export-panel">
-            <p className="eyebrow">匯出</p>
-
-            <div className="scope-switch">
-              <button
-                className={exportScope === "active" ? "scope active" : "scope"}
-                onClick={() => setExportScope("active")}
-              >
-                當前專案
-              </button>
-              <button
-                className={exportScope === "all" ? "scope active" : "scope"}
-                onClick={() => setExportScope("all")}
-              >
-                全部專案
-              </button>
-            </div>
-
-            <div className="export-actions">
-              <button className="secondary-btn" onClick={() => exportAsTxt(workspace, exportScope)}>
-                匯出 TXT
-              </button>
-              <button className="secondary-btn" onClick={exportWord} disabled={isExportingDocx}>
-                {isExportingDocx ? "匯出中..." : "匯出 Word"}
-              </button>
-              <button className="secondary-btn" onClick={() => exportAsXlsx(workspace, exportScope)}>
-                匯出 Excel
-              </button>
-            </div>
-          </section>
         </aside>
+        {showGlobalStorageAlert && (
+          <div className="storage-alert" role="status" aria-live="polite">
+            {storageStatus}
+          </div>
+        )}
       </div>
 
       {contextMenu && (
@@ -4407,11 +5823,123 @@ function App() {
         </div>
       )}
 
+      {anyOverlayModalOpen && <div className="modal-stack-overlay" />}
+
+      {trashModalOpen && (
+        <div className="modal-backdrop" style={modalBackdropStyle("trash")}>
+          <div
+            className="modal-card modal-large draggable-modal trash-modal"
+            style={modalCardStyle("trash")}
+            onMouseDown={(event) => {
+              activateOverlayModal("trash");
+              event.stopPropagation();
+            }}
+          >
+            <div className="modal-head modal-drag-handle" onMouseDown={(event) => startModalDrag(event, "trash")}>
+              <div className="trash-modal-title-row">
+                <div>
+                  <h3>回收站</h3>
+                  <p className="meta-text">最多保留 100 次刪除操作；超過後會自動永久移除最舊一筆。</p>
+                </div>
+                <span className="trash-capacity">{workspace.trash.length} / {TRASH_ITEM_LIMIT}</span>
+              </div>
+            </div>
+
+            <div className="trash-list">
+              {workspace.trash.length === 0 ? (
+                <div className="empty-inline">
+                  <p>回收站目前是空的。</p>
+                </div>
+              ) : (
+                workspace.trash.map((item) => {
+                  const blockedReason = trashRestoreBlockReason(item);
+                  const typeLabel =
+                    item.payload.kind === "project"
+                      ? "專案"
+                      : item.payload.kind === "chapter"
+                        ? "章節"
+                        : "史料";
+                  const detail =
+                    item.payload.kind === "project"
+                      ? `${item.payload.chapters.length} 個章節 · ${item.payload.entries.length} 條史料`
+                      : item.payload.kind === "chapter"
+                        ? `${item.payload.chapters.length} 個章節 · ${item.payload.entries.length} 條史料`
+                        : `${item.payload.entries.length} 條史料`;
+                  return (
+                    <article key={item.id} className="trash-item">
+                      <div className="trash-item-main">
+                        <div className="trash-item-heading">
+                          <span className={`trash-kind trash-kind-${item.payload.kind}`}>{typeLabel}</span>
+                          <strong title={item.label}>{item.label}</strong>
+                        </div>
+                        <p className="meta-text">{detail} · {formatDateTimeLabel(item.deletedAt)}</p>
+                        {blockedReason && <p className="trash-blocked-reason">{blockedReason}</p>}
+                      </div>
+                      <div className="trash-item-actions">
+                        <button
+                          type="button"
+                          className="secondary-btn"
+                          disabled={Boolean(blockedReason)}
+                          onClick={() => restoreTrashItem(item.id)}
+                        >
+                          還原
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-btn danger-btn"
+                          onClick={() => permanentlyDeleteTrashItem(item.id)}
+                        >
+                          永久刪除
+                        </button>
+                      </div>
+                    </article>
+                  );
+                })
+              )}
+            </div>
+
+            <div className="modal-actions trash-modal-actions">
+              <button className="ghost-btn" onClick={() => setTrashModalOpen(false)}>
+                關閉
+              </button>
+              <button
+                className="ghost-btn danger-btn"
+                disabled={workspace.trash.length === 0}
+                onClick={emptyTrash}
+              >
+                清空回收站
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {storageModalOpen && (
-        <div className="modal-backdrop" onMouseDown={() => setStorageModalOpen(false)}>
-          <div className="modal-card modal-large" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="modal-head">
-              <h3>檔案資料管理</h3>
+        <div className="modal-backdrop" style={modalBackdropStyle("storage")}>
+          <div
+            className="modal-card modal-large draggable-modal"
+            style={modalCardStyle("storage")}
+            onMouseDown={(event) => {
+              activateOverlayModal("storage");
+              event.stopPropagation();
+            }}
+          >
+            <div className="modal-head modal-drag-handle" onMouseDown={(event) => startModalDrag(event, "storage")}>
+              <div className="storage-head-row">
+                <h3>檔案資料管理</h3>
+                <button
+                  type="button"
+                  className="icon-btn storage-info-btn"
+                  title="檔案格式說明"
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={() => {
+                    activateOverlayModal("storage-format-info");
+                    setStorageFormatInfoModalOpen(true);
+                  }}
+                >
+                  i
+                </button>
+              </div>
               <p className="meta-text">手動管理專案與史料資料檔的存放位置。</p>
             </div>
 
@@ -4448,9 +5976,22 @@ function App() {
               {storageStatus && <p className="status-text">{storageStatus}</p>}
             </div>
 
-            <div className="modal-actions">
-              <button className="ghost-btn" onClick={() => setStorageModalOpen(false)} disabled={storageBusy}>
+            <div className="modal-actions storage-actions">
+              <button className="ghost-btn" onClick={closeStorageModal} disabled={storageBusy}>
                 關閉
+              </button>
+              <button
+                className="ghost-btn"
+                onClick={() => {
+                  activateOverlayModal("storage-save-as");
+                  setStorageSaveAsModalOpen(true);
+                }}
+                disabled={storageBusy}
+              >
+                備份到
+              </button>
+              <button className="ghost-btn" onClick={() => void importWorkspaceFromFile()} disabled={storageBusy}>
+                匯入檔案
               </button>
               <button className="ghost-btn" onClick={() => void reloadWorkspaceFromStorage()} disabled={storageBusy}>
                 從資料檔重載
@@ -4474,10 +6015,111 @@ function App() {
         </div>
       )}
 
+      {storageSaveAsModalOpen && (
+        <div className="modal-backdrop" style={modalBackdropStyle("storage-save-as")}>
+          <div
+            className="modal-card draggable-modal"
+            style={modalCardStyle("storage-save-as")}
+            onMouseDown={(event) => {
+              activateOverlayModal("storage-save-as");
+              event.stopPropagation();
+            }}
+          >
+            <div
+              className="modal-head modal-drag-handle"
+              onMouseDown={(event) => startModalDrag(event, "storage-save-as")}
+            >
+              <h3>備份到</h3>
+              <p className="meta-text">請選擇備份範圍。</p>
+            </div>
+
+            <div className="tool-row">
+              <button
+                className="secondary-btn"
+                onClick={() => void backupWorkspaceToFile("active")}
+                disabled={storageBusy || !activeProject}
+              >
+                備份當前專案
+              </button>
+              <button
+                className="secondary-btn"
+                onClick={() => void backupWorkspaceToFile("all")}
+                disabled={storageBusy}
+              >
+                備份全部專案
+              </button>
+            </div>
+
+            {!activeProject && <p className="meta-text">目前沒有可用的當前專案。</p>}
+
+            <div className="modal-actions">
+              <button
+                className="ghost-btn"
+                onClick={() => setStorageSaveAsModalOpen(false)}
+                disabled={storageBusy}
+              >
+                取消
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {storageFormatInfoModalOpen && (
+        <div className="modal-backdrop" style={modalBackdropStyle("storage-format-info")}>
+          <div
+            className="modal-card modal-large draggable-modal"
+            style={modalCardStyle("storage-format-info")}
+            onMouseDown={(event) => {
+              activateOverlayModal("storage-format-info");
+              event.stopPropagation();
+            }}
+          >
+            <div
+              className="modal-head modal-drag-handle"
+              onMouseDown={(event) => startModalDrag(event, "storage-format-info")}
+            >
+              <h3>檔案格式說明</h3>
+              <p className="meta-text">本 App 使用 JSON 工作臺檔案，可直接匯入與管理。</p>
+            </div>
+
+            <div className="storage-format-list">
+              <p className="meta-text">
+                檔案為 UTF-8 JSON，頂層包含 `projectOrder`、`projects`、`chapters`、`entries`、
+                `activeProjectId`、`activeChapterId`、`selectedEntryId`。
+              </p>
+              <p className="meta-text">
+                `entries` 內保留每條史料的時間、摘要、史料文本、備註、引文註釋，以及建立/修改時間戳。
+              </p>
+              <p className="meta-text">
+                「匯入檔案」會把內容加入目前工作臺，不會直接覆蓋既有資料；匯入前會再次要求確認。
+              </p>
+              <p className="meta-text">
+                「備份到」只會產生備份副本，不會改動目前工作臺；如目標檔已存在，會先要求你確認再覆蓋。
+              </p>
+              <p className="meta-text">建議副檔名使用 `.json`，方便備份與版本管理。</p>
+            </div>
+
+            <div className="modal-actions">
+              <button className="ghost-btn" onClick={() => setStorageFormatInfoModalOpen(false)}>
+                關閉
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {formModal && (
-        <div className="modal-backdrop" onMouseDown={() => setModalState(null)}>
-          <div className="modal-card" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="modal-head">
+        <div className="modal-backdrop" style={modalBackdropStyle("form")}>
+          <div
+            className="modal-card draggable-modal"
+            style={modalCardStyle("form")}
+            onMouseDown={(event) => {
+              activateOverlayModal("form");
+              event.stopPropagation();
+            }}
+          >
+            <div className="modal-head modal-drag-handle" onMouseDown={(event) => startModalDrag(event, "form")}>
               <h3>
                 {formModal.kind === "project-create" && "新增專案"}
                 {formModal.kind === "project-rename" && "編輯專案名"}
@@ -4526,16 +6168,24 @@ function App() {
       )}
 
       {entryViewModal && viewedEntry && (
-        <div className="modal-backdrop" onMouseDown={() => setModalState(null)}>
-          <div className="modal-card modal-large entry-view-modal" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="modal-head entry-view-head">
+        <div className="modal-backdrop" style={modalBackdropStyle("entry-view")}>
+          <div
+            className="modal-card modal-large entry-view-modal draggable-modal"
+            style={modalCardStyle("entry-view")}
+            onMouseDown={(event) => {
+              activateOverlayModal("entry-view");
+              event.stopPropagation();
+            }}
+          >
+            <div
+              className="modal-head entry-view-head modal-drag-handle"
+              onMouseDown={(event) => startModalDrag(event, "entry-view")}
+            >
               <div className="entry-view-head-main">
                 <h3>{entryViewModal.editing ? "檢視 / 編輯史料" : "檢視史料"}</h3>
                 <p className="meta-text">
                   {workspace.projects[viewedEntry.projectId]?.title || "未命名專案"} /{" "}
-                  {viewedEntry.chapterId
-                    ? workspace.chapters[viewedEntry.chapterId]?.title || "未分章"
-                    : "未分章"}
+                  {workspace.chapters[viewedEntry.chapterId]?.title || "未命名章節"}
                 </p>
               </div>
               <button className="ghost-btn danger-btn" onClick={() => deleteEntry(viewedEntry.id)}>
@@ -4595,6 +6245,8 @@ function App() {
                       <button
                         type="button"
                         className="icon-btn format-btn"
+                        aria-label="加粗"
+                        aria-pressed={sourceFormatState.bold}
                         title="粗體（⌘B）"
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={() => applySourceMarker("bold")}
@@ -4604,6 +6256,8 @@ function App() {
                       <button
                         type="button"
                         className="icon-btn format-btn"
+                        aria-label="斜體"
+                        aria-pressed={sourceFormatState.italic}
                         title="斜體（⌘I）"
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={() => applySourceMarker("italic")}
@@ -4613,6 +6267,8 @@ function App() {
                       <button
                         type="button"
                         className="icon-btn format-btn"
+                        aria-label="下劃線"
+                        aria-pressed={sourceFormatState.underline}
                         title="下劃線（⌘U）"
                         onMouseDown={(event) => event.preventDefault()}
                         onClick={() => applySourceMarker("underline")}
@@ -4626,7 +6282,10 @@ function App() {
                       rows={8}
                       value={viewedEntryDraft?.sourceText ?? ""}
                       onChange={(event) => updateEntryModalDraft({ sourceText: event.target.value })}
+                      onClick={syncSourceFormatState}
                       onKeyDown={handleSourceShortcut}
+                      onKeyUp={syncSourceFormatState}
+                      onSelect={syncSourceFormatState}
                       placeholder="輸入原始史料文本..."
                     />
                   </>
@@ -4725,9 +6384,19 @@ function App() {
       )}
 
       {entryModal && (
-        <div className="modal-backdrop" onMouseDown={() => setModalState(null)}>
-          <div className="modal-card modal-large" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="modal-head">
+        <div className="modal-backdrop" style={modalBackdropStyle("entry-form")}>
+          <div
+            className="modal-card modal-large draggable-modal"
+            style={modalCardStyle("entry-form")}
+            onMouseDown={(event) => {
+              activateOverlayModal("entry-form");
+              event.stopPropagation();
+            }}
+          >
+            <div
+              className="modal-head modal-drag-handle"
+              onMouseDown={(event) => startModalDrag(event, "entry-form")}
+            >
               <h3>{entryModal.kind === "entry-create" ? "新增史料" : "編輯史料"}</h3>
               <p className="meta-text">五元素：時間 / 摘要 / 史料文本 / 備註 / 引文註釋；備註支持 `#標籤`。</p>
             </div>
@@ -4757,6 +6426,8 @@ function App() {
                   <button
                     type="button"
                     className="icon-btn format-btn"
+                    aria-label="加粗"
+                    aria-pressed={sourceFormatState.bold}
                     title="粗體（⌘B）"
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => applySourceMarker("bold")}
@@ -4766,6 +6437,8 @@ function App() {
                   <button
                     type="button"
                     className="icon-btn format-btn"
+                    aria-label="斜體"
+                    aria-pressed={sourceFormatState.italic}
                     title="斜體（⌘I）"
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => applySourceMarker("italic")}
@@ -4775,6 +6448,8 @@ function App() {
                   <button
                     type="button"
                     className="icon-btn format-btn"
+                    aria-label="下劃線"
+                    aria-pressed={sourceFormatState.underline}
                     title="下劃線（⌘U）"
                     onMouseDown={(event) => event.preventDefault()}
                     onClick={() => applySourceMarker("underline")}
@@ -4788,7 +6463,10 @@ function App() {
                   rows={8}
                   value={entryModal.draft.sourceText}
                   onChange={(event) => updateEntryModalDraft({ sourceText: event.target.value })}
+                  onClick={syncSourceFormatState}
                   onKeyDown={handleSourceShortcut}
+                  onKeyUp={syncSourceFormatState}
+                  onSelect={syncSourceFormatState}
                   placeholder="輸入原始史料文本..."
                 />
               </label>
@@ -4827,203 +6505,89 @@ function App() {
       )}
 
       {advancedModal.open && (
-        <div className="modal-backdrop" onMouseDown={() => setAdvancedModal((state) => ({ ...state, open: false }))}>
-          <div className="modal-card modal-xl" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="modal-head">
+        <div className="modal-backdrop" style={modalBackdropStyle("advanced")}>
+          <div
+            className="modal-card modal-xl draggable-modal"
+            style={modalCardStyle("advanced")}
+            onMouseDown={(event) => {
+              activateOverlayModal("advanced");
+              event.stopPropagation();
+            }}
+          >
+            <div
+              className="modal-head modal-drag-handle"
+              onMouseDown={(event) => startModalDrag(event, "advanced")}
+            >
               <h3>高級檢索</h3>
-              <p className="meta-text">以關鍵字、標籤、引文檢索，並將結果匯入至專案或章節。</p>
+              <p className="meta-text">以關鍵字檢索，並將結果匯入至專案或章節。</p>
             </div>
 
-            <div className="modal-grid advanced-modal-body">
-              <div className="advanced-filter-grid">
-                <label className="modal-label">
-                  關鍵字
-                  <input
-                    value={advancedModal.query}
-                    onChange={(event) =>
-                      setAdvancedModal((state) => ({ ...state, query: event.target.value }))
-                    }
-                    placeholder="檢索時間、摘要、史料文本、備註、引文註釋..."
-                  />
-                </label>
-
-                <label className="modal-label">
-                  標籤（可選）
-                  <input
-                    list="advanced-tag-list"
-                    value={advancedModal.tag}
-                    onChange={(event) =>
-                      setAdvancedModal((state) => ({ ...state, tag: event.target.value }))
-                    }
-                    placeholder="如：#人物、#政治"
-                  />
-                  <datalist id="advanced-tag-list">
-                    {allTags.map((tag) => (
-                      <option key={`advanced-${tag}`} value={tag} />
-                    ))}
-                  </datalist>
-                </label>
-
-                <label className="modal-label">
-                  引文《》書名（可選）
-                  <input
-                    value={advancedModal.citationTitle}
-                    onChange={(event) =>
-                      setAdvancedModal((state) => ({ ...state, citationTitle: event.target.value }))
-                    }
-                    placeholder="如：明史 / 資治通鑑"
-                  />
-                </label>
-              </div>
-
-              <section className="advanced-scope-panel">
-                <div className="advanced-scope-head">
-                  <p className="eyebrow">關鍵字檢索範圍</p>
-                  <p className="meta-text">可勾選一個或多個欄位</p>
+            <div className="modal-grid advanced-modal-body advanced-layout">
+              <section className="advanced-left-column">
+                <div className="advanced-filter-grid">
+                  <label className="modal-label">
+                    關鍵字
+                    <input
+                      value={advancedModal.query}
+                      onFocus={() => setNavigationScope("advanced")}
+                      onChange={(event) =>
+                        setAdvancedModal((state) => ({ ...state, query: event.target.value }))
+                      }
+                      placeholder="檢索時間、摘要、史料文本、備註、引文註釋..."
+                    />
+                  </label>
+                  <label className="modal-label">
+                    標籤
+                    <select
+                      value={advancedModal.tag}
+                      onFocus={() => setNavigationScope("advanced")}
+                      onChange={(event) =>
+                        setAdvancedModal((state) => ({ ...state, tag: event.target.value }))
+                      }
+                    >
+                      <option value="">全部標籤（{allTags.length}）</option>
+                      {allTags.map((tag) => (
+                        <option key={`advanced-tag-${tag}`} value={tag}>
+                          {tag}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                 </div>
-                <div className="advanced-scope-grid">
-                  {ADVANCED_QUERY_SCOPE_OPTIONS.map((option) => {
-                    const checked = advancedModal.queryScopes.includes(option.value);
-                    return (
-                      <label
-                        key={`advanced-scope-${option.value}`}
-                        className={`advanced-scope-item ${checked ? "checked" : ""}`}
-                      >
-                        <input
-                          type="checkbox"
-                          checked={checked}
-                          onChange={(event) => {
-                            setAdvancedModal((state) => {
-                              const next = event.target.checked
-                                ? Array.from(new Set([...state.queryScopes, option.value]))
-                                : state.queryScopes.filter((scope) => scope !== option.value);
-                              return { ...state, queryScopes: next };
-                            });
-                          }}
-                        />
-                        <span>{option.label}</span>
-                      </label>
-                    );
-                  })}
-                </div>
-              </section>
 
-              <div className="advanced-results-head">
-                <p className="result-meta">
-                  {hasAdvancedSearch
-                    ? `共 ${advancedResults.length} 條結果`
-                    : "請至少輸入一個檢索條件。"}
-                </p>
-                <button
-                  className="ghost-btn"
-                  onClick={() =>
-                    setAdvancedModal((state) => ({
-                      ...state,
-                      query: "",
-                      queryScopes: DEFAULT_ADVANCED_QUERY_SCOPES,
-                      tag: "",
-                      citationTitle: "",
-                    }))
-                  }
-                >
-                  清空條件
-                </button>
-              </div>
-
-              <div
-                ref={advancedResultsRef}
-                className="advanced-results"
-                onScroll={(event) => setAdvancedResultsScrollTop(event.currentTarget.scrollTop)}
-              >
-                {hasAdvancedSearch ? (
-                  deferredAdvancedQuery.trim() && !hasAdvancedQueryScope ? (
-                    <p className="empty-inline">請至少勾選一個關鍵字檢索欄位。</p>
-                  ) : advancedResults.length === 0 ? (
-                    <p className="empty-inline">未檢索到符合內容。</p>
-                  ) : (
-                    <>
-                      {shouldVirtualizeAdvancedResults && (
-                        <div style={{ height: `${advancedVirtualRange.topSpacer}px` }} />
-                      )}
-                      {visibleAdvancedResults.map((result) => {
-                      const entry = workspace.entries[result.entryId];
+                <section className="advanced-scope-panel">
+                  <div className="advanced-scope-head">
+                    <p className="eyebrow">關鍵字檢索範圍</p>
+                    <p className="meta-text">可勾選一個或多個欄位</p>
+                  </div>
+                  <div className="advanced-scope-grid">
+                    {ADVANCED_QUERY_SCOPE_OPTIONS.map((option) => {
+                      const checked = advancedModal.queryScopes.includes(option.value);
                       return (
-                        <button
-                          key={`advanced-${result.entryId}`}
-                          className="advanced-result virtualized-row"
-                          onClick={() => jumpToSearchResult(result, advancedHighlightQuery)}
-                          onDoubleClick={() => {
-                            jumpToSearchResult(result, advancedHighlightQuery);
-                            beginViewEntry(result.entryId, advancedHighlightQuery);
-                          }}
+                        <label
+                          key={`advanced-scope-${option.value}`}
+                          className={`advanced-scope-item ${checked ? "checked" : ""}`}
                         >
-                          <div
-                            className="search-path"
-                            dangerouslySetInnerHTML={{
-                              __html: renderHighlightedPlainText(
-                                `${result.projectTitle} / ${result.chapterTitle}`,
-                                advancedHighlightQuery,
-                              ),
+                          <input
+                            type="checkbox"
+                            checked={checked}
+                            onChange={(event) => {
+                              setAdvancedModal((state) => {
+                                const next = event.target.checked
+                                  ? Array.from(new Set([...state.queryScopes, option.value]))
+                                  : state.queryScopes.filter((scope) => scope !== option.value);
+                                return { ...state, queryScopes: next };
+                              });
                             }}
                           />
-                          <div
-                            className="search-time"
-                            dangerouslySetInnerHTML={{
-                              __html: renderHighlightedPlainText(
-                                formatEntryHeadline(result.timeText, result.summaryText),
-                                advancedHighlightQuery,
-                              ),
-                            }}
-                          />
-                          {entry?.sourceText.trim() ? (
-                            <div
-                              className="advanced-source rich-markup"
-                              dangerouslySetInnerHTML={{
-                                __html: renderHighlightedLightMarkup(
-                                  summarizeAroundMatch(entry.sourceText, advancedHighlightQuery, 220),
-                                  advancedHighlightQuery,
-                                ),
-                              }}
-                            />
-                          ) : (
-                            <div className="advanced-source">（尚未輸入史料文本）</div>
-                          )}
-                          <div
-                            className="search-citation"
-                            dangerouslySetInnerHTML={{
-                              __html: renderHighlightedPlainText(
-                                summarizeAroundMatch(
-                                  entry?.citation.trim() || "",
-                                  advancedHighlightQuery,
-                                  120,
-                                ) || "（尚未輸入引文註釋）",
-                                advancedHighlightQuery,
-                              ),
-                            }}
-                          />
-                          {result.tags.length > 0 && (
-                            <div className="tag-row">
-                              {result.tags.map((tag) => (
-                                <span key={`${result.entryId}-advanced-${tag}`} className="tag-chip">
-                                  {tag}
-                                </span>
-                              ))}
-                            </div>
-                          )}
-                        </button>
+                          <span>{option.label}</span>
+                        </label>
                       );
-                      })}
-                      {shouldVirtualizeAdvancedResults && (
-                        <div style={{ height: `${advancedVirtualRange.bottomSpacer}px` }} />
-                      )}
-                    </>
-                  )
-                ) : (
-                  <p className="empty-inline">輸入檢索條件後，結果會顯示在這裡。</p>
-                )}
-              </div>
+                    })}
+                  </div>
+                </section>
 
-              <section className="advanced-destination">
+                <section className="advanced-destination">
                 <p className="eyebrow">結果匯入</p>
                 <div className="advanced-mode-grid">
                   <button
@@ -5037,12 +6601,6 @@ function App() {
                     onClick={() => setAdvancedModal((state) => ({ ...state, targetMode: "new-chapter" }))}
                   >
                     新章節
-                  </button>
-                  <button
-                    className={advancedModal.targetMode === "existing-project" ? "scope active" : "scope"}
-                    onClick={() => setAdvancedModal((state) => ({ ...state, targetMode: "existing-project" }))}
-                  >
-                    現有專案
                   </button>
                   <button
                     className={advancedModal.targetMode === "existing-chapter" ? "scope active" : "scope"}
@@ -5140,19 +6698,130 @@ function App() {
                     </select>
                   </label>
                 )}
+                </section>
+              </section>
+
+              <section className="advanced-right-column">
+                <div className="advanced-results-head">
+                  <p className="eyebrow">檢索預覽</p>
+                  <p className="result-meta">
+                    {hasAdvancedSearch
+                      ? `共 ${advancedResults.length} 條結果`
+                      : "請至少輸入一個檢索條件。"}
+                  </p>
+                </div>
+
+                <div
+                  ref={advancedResultsRef}
+                  className="advanced-results"
+                  onMouseDown={() => setNavigationScope("advanced")}
+                  onScroll={(event) => setAdvancedResultsScrollTop(event.currentTarget.scrollTop)}
+                >
+                  {hasAdvancedSearch ? (
+                    deferredAdvancedQuery.trim() && !hasAdvancedQueryScope ? (
+                      <p className="empty-inline">請至少勾選一個關鍵字檢索欄位。</p>
+                    ) : advancedResults.length === 0 ? (
+                      <p className="empty-inline">未檢索到符合內容。</p>
+                    ) : (
+                      <>
+                        {shouldVirtualizeAdvancedResults && (
+                          <div style={{ height: `${advancedVirtualRange.topSpacer}px` }} />
+                        )}
+                        {visibleAdvancedResults.map((result) => {
+                        const entry = workspace.entries[result.entryId];
+                        return (
+                          <button
+                            key={`advanced-${result.entryId}`}
+                            data-advanced-entry-id={result.entryId}
+                            className={`advanced-result virtualized-row ${selectedAdvancedResultEntryId === result.entryId ? "selected" : ""}`}
+                            onClick={() => {
+                              setSelectedAdvancedResultEntryId(result.entryId);
+                              jumpToSearchResult(result, advancedHighlightQuery, "advanced");
+                            }}
+                            onDoubleClick={() => {
+                              setSelectedAdvancedResultEntryId(result.entryId);
+                              jumpToSearchResult(result, advancedHighlightQuery, "advanced");
+                              beginViewEntry(result.entryId, advancedHighlightQuery);
+                            }}
+                          >
+                            <div
+                              className="search-path"
+                              dangerouslySetInnerHTML={{
+                                __html: renderHighlightedPlainText(
+                                  `${result.projectTitle} / ${result.chapterTitle}`,
+                                  advancedHighlightQuery,
+                                ),
+                              }}
+                            />
+                            <div
+                              className="search-time"
+                              dangerouslySetInnerHTML={{
+                                __html: renderHighlightedPlainText(
+                                  formatEntryHeadline(result.timeText, result.summaryText),
+                                  advancedHighlightQuery,
+                                ),
+                              }}
+                            />
+                            {entry?.sourceText.trim() ? (
+                              <div
+                                className="advanced-source rich-markup"
+                                dangerouslySetInnerHTML={{
+                                  __html: renderHighlightedLightMarkup(
+                                    summarizeAroundMatch(entry.sourceText, advancedHighlightQuery, 220),
+                                    advancedHighlightQuery,
+                                  ),
+                                }}
+                              />
+                            ) : (
+                              <div className="advanced-source">（尚未輸入史料文本）</div>
+                            )}
+                            <div
+                              className="search-citation"
+                              dangerouslySetInnerHTML={{
+                                __html: renderHighlightedPlainText(
+                                  summarizeAroundMatch(
+                                    entry?.citation.trim() || "",
+                                    advancedHighlightQuery,
+                                    120,
+                                  ) || "（尚未輸入引文註釋）",
+                                  advancedHighlightQuery,
+                                ),
+                              }}
+                            />
+                            {result.tags.length > 0 && (
+                              <div className="tag-row">
+                                {result.tags.map((tag) => (
+                                  <span key={`${result.entryId}-advanced-${tag}`} className="tag-chip">
+                                    {tag}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
+                          </button>
+                        );
+                        })}
+                        {shouldVirtualizeAdvancedResults && (
+                          <div style={{ height: `${advancedVirtualRange.bottomSpacer}px` }} />
+                        )}
+                      </>
+                    )
+                  ) : (
+                    <p className="empty-inline">輸入檢索條件後，結果會顯示在這裡。</p>
+                  )}
+                </div>
               </section>
             </div>
 
             <div className="modal-actions">
               <button className="ghost-btn" onClick={() => setAdvancedModal((state) => ({ ...state, open: false }))}>
-                取消
+                確定
               </button>
               <button
                 className="secondary-btn"
                 onClick={importAdvancedResults}
                 disabled={!hasAdvancedSearch || advancedResults.length === 0}
               >
-                匯入檢索結果
+                匯出檢索結果
               </button>
             </div>
           </div>
@@ -5160,9 +6829,19 @@ function App() {
       )}
 
       {mergeModal.open && (
-        <div className="modal-backdrop" onMouseDown={() => setMergeModal((state) => ({ ...state, open: false }))}>
-          <div className="modal-card modal-large" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="modal-head">
+        <div className="modal-backdrop" style={modalBackdropStyle("merge-project")}>
+          <div
+            className="modal-card modal-large draggable-modal"
+            style={modalCardStyle("merge-project")}
+            onMouseDown={(event) => {
+              activateOverlayModal("merge-project");
+              event.stopPropagation();
+            }}
+          >
+            <div
+              className="modal-head modal-drag-handle"
+              onMouseDown={(event) => startModalDrag(event, "merge-project")}
+            >
               <h3>合併專案</h3>
               <p className="meta-text">可合併到當前專案，或合併並生成新的專案。</p>
             </div>
@@ -5239,12 +6918,19 @@ function App() {
       )}
 
       {chapterMergeModal.open && (
-        <div
-          className="modal-backdrop"
-          onMouseDown={() => setChapterMergeModal((state) => ({ ...state, open: false }))}
-        >
-          <div className="modal-card modal-large" onMouseDown={(event) => event.stopPropagation()}>
-            <div className="modal-head">
+        <div className="modal-backdrop" style={modalBackdropStyle("merge-chapter")}>
+          <div
+            className="modal-card modal-large draggable-modal"
+            style={modalCardStyle("merge-chapter")}
+            onMouseDown={(event) => {
+              activateOverlayModal("merge-chapter");
+              event.stopPropagation();
+            }}
+          >
+            <div
+              className="modal-head modal-drag-handle"
+              onMouseDown={(event) => startModalDrag(event, "merge-chapter")}
+            >
               <h3>合併章節</h3>
               <p className="meta-text">選擇多個章節，合併為目標專案中的新章節（不刪除來源章節）。</p>
             </div>

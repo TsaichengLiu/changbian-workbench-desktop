@@ -3,6 +3,11 @@
 const fs = require("fs");
 const path = require("path");
 const os = require("os");
+const {
+  WORKSPACE_SCHEMA_VERSION,
+  readWorkspaceFile,
+  writeWorkspaceFile,
+} = require("../electron/workspace-store.cjs");
 
 const DEFAULT_STORAGE_FILE = path.join(os.homedir(), ".changbian-workbench", "workspace.json");
 const SETTINGS_FILE = path.join(os.homedir(), ".changbian-workbench", "settings.json");
@@ -26,8 +31,6 @@ function resolveStorageFile() {
     return DEFAULT_STORAGE_FILE;
   }
 }
-
-const STORAGE_FILE = resolveStorageFile();
 
 const TAG_REGEX = /#([^\s#，。；、,.;:!?！？【】（）()<>《》]+)/g;
 const CITATION_TITLE_REGEX = /《([^》\n\r]+)》/g;
@@ -78,61 +81,50 @@ function includesIgnoreCase(text, query) {
   return String(text || "").toLowerCase().includes(query.toLowerCase());
 }
 
-function ensureDirForFile(filePath) {
-  const dir = path.dirname(filePath);
-  fs.mkdirSync(dir, { recursive: true });
-}
-
 function createInitialWorkspace() {
   const projectId = createId("project");
   return {
+    schemaVersion: WORKSPACE_SCHEMA_VERSION,
+    revision: 0,
     projectOrder: [projectId],
     projects: {
       [projectId]: {
         id: projectId,
         title: "MCP 新建專案",
         chapterIds: [],
-        entryIds: [],
         createdAt: Date.now(),
       },
     },
     chapters: {},
     entries: {},
+    trash: [],
     activeProjectId: projectId,
     activeChapterId: null,
     selectedEntryId: null,
   };
 }
 
-function loadWorkspace() {
-  try {
-    if (!fs.existsSync(STORAGE_FILE)) {
-      const initial = createInitialWorkspace();
-      saveWorkspace(initial);
-      return initial;
-    }
-    const raw = fs.readFileSync(STORAGE_FILE, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") {
-      throw new Error("invalid workspace payload");
-    }
-    const entries = parsed.entries && typeof parsed.entries === "object" ? parsed.entries : {};
-    for (const entry of Object.values(entries)) {
-      if (entry && typeof entry === "object" && typeof entry.summary !== "string") {
-        entry.summary = "";
-      }
-    }
-    return parsed;
-  } catch (error) {
-    const fallback = createInitialWorkspace();
-    saveWorkspace(fallback);
-    return fallback;
+function loadWorkspace(storageFile) {
+  const result = readWorkspaceFile(storageFile);
+  if (!result.ok) {
+    throw new Error(`${result.error}。原檔已保留，請先修復或從 .bak 還原。`);
   }
+  if (result.workspace) return result.workspace;
+
+  const initial = createInitialWorkspace();
+  const created = writeWorkspaceFile(storageFile, initial, { expectedRevision: 0 });
+  if (!created.ok) throw new Error(created.error || "無法建立工作臺資料檔");
+  return created.workspace;
 }
 
-function saveWorkspace(workspace) {
-  ensureDirForFile(STORAGE_FILE);
-  fs.writeFileSync(STORAGE_FILE, JSON.stringify(workspace, null, 2), "utf8");
+function saveWorkspace(workspace, storageFile) {
+  const result = writeWorkspaceFile(storageFile, workspace, {
+    expectedRevision: Number.isInteger(workspace.revision) ? workspace.revision : 0,
+  });
+  if (!result.ok) {
+    throw new Error(result.error || "資料寫入失敗");
+  }
+  workspace.revision = result.revision;
 }
 
 function uniqueProjectTitle(workspace, rawTitle) {
@@ -154,14 +146,15 @@ function appendEntry(workspace, payload) {
     throw new Error("project_id 不存在");
   }
 
-  if (payload.chapterId) {
-    const chapter = workspace.chapters[payload.chapterId];
-    if (!chapter) {
-      throw new Error("chapter_id 不存在");
-    }
-    if (chapter.projectId !== payload.projectId) {
-      throw new Error("chapter_id 不屬於 project_id");
-    }
+  if (!payload.chapterId) {
+    throw new Error("chapter_id 為必填：史料必須錄入某個章節");
+  }
+  const chapter = workspace.chapters[payload.chapterId];
+  if (!chapter) {
+    throw new Error("chapter_id 不存在");
+  }
+  if (chapter.projectId !== payload.projectId) {
+    throw new Error("chapter_id 不屬於 project_id");
   }
 
   const entryId = createId("entry");
@@ -169,7 +162,7 @@ function appendEntry(workspace, payload) {
   workspace.entries[entryId] = {
     id: entryId,
     projectId: payload.projectId,
-    chapterId: payload.chapterId || null,
+    chapterId: payload.chapterId,
     timeText: payload.timeText || "",
     summary: payload.summary || "",
     sourceText: payload.sourceText || "",
@@ -179,14 +172,10 @@ function appendEntry(workspace, payload) {
     updatedAt: now,
   };
 
-  if (payload.chapterId) {
-    workspace.chapters[payload.chapterId].entryIds.push(entryId);
-  } else {
-    project.entryIds.push(entryId);
-  }
+  workspace.chapters[payload.chapterId].entryIds.push(entryId);
 
   workspace.activeProjectId = payload.projectId;
-  workspace.activeChapterId = payload.chapterId || null;
+  workspace.activeChapterId = payload.chapterId;
   workspace.selectedEntryId = entryId;
 
   return entryId;
@@ -233,14 +222,14 @@ const TOOLS = [
       type: "object",
       properties: {
         project_id: { type: "string", description: "目標專案 ID" },
-        chapter_id: { type: "string", description: "目標章節 ID（可選）" },
+        chapter_id: { type: "string", description: "目標章節 ID（必填，史料一律錄入章節之下）" },
         time_text: { type: "string", description: "時間文本" },
         summary: { type: "string", description: "摘要（可選）" },
         source_text: { type: "string", description: "史料文本" },
         note: { type: "string", description: "備註（可含 #標籤）" },
         citation: { type: "string", description: "引文註釋" },
       },
-      required: ["project_id", "source_text"],
+      required: ["project_id", "chapter_id", "source_text"],
       additionalProperties: false,
     },
   },
@@ -278,7 +267,8 @@ function parseArgs(params) {
 }
 
 function handleToolCall(name, args) {
-  const workspace = loadWorkspace();
+  const storageFile = resolveStorageFile();
+  const workspace = loadWorkspace(storageFile);
 
   if (name === "list_projects") {
     const projects = workspace.projectOrder
@@ -294,7 +284,7 @@ function handleToolCall(name, args) {
           id: project.id,
           title: project.title,
           chapter_count: chapterCount,
-          entry_count: project.entryIds.length + chapterEntryCount,
+          entry_count: chapterEntryCount,
           chapters: project.chapterIds
             .map((chapterId) => workspace.chapters[chapterId])
             .filter(Boolean)
@@ -307,7 +297,7 @@ function handleToolCall(name, args) {
       });
 
     return toolText({
-      storage_file: STORAGE_FILE,
+      storage_file: storageFile,
       project_count: projects.length,
       projects,
     });
@@ -320,14 +310,13 @@ function handleToolCall(name, args) {
       id: projectId,
       title,
       chapterIds: [],
-      entryIds: [],
       createdAt: Date.now(),
     };
     workspace.projectOrder.push(projectId);
     workspace.activeProjectId = projectId;
     workspace.activeChapterId = null;
     workspace.selectedEntryId = null;
-    saveWorkspace(workspace);
+    saveWorkspace(workspace, storageFile);
 
     return toolText({
       ok: true,
@@ -356,7 +345,7 @@ function handleToolCall(name, args) {
     workspace.activeProjectId = projectId;
     workspace.activeChapterId = chapterId;
     workspace.selectedEntryId = null;
-    saveWorkspace(workspace);
+    saveWorkspace(workspace, storageFile);
 
     return toolText({
       ok: true,
@@ -379,7 +368,7 @@ function handleToolCall(name, args) {
       note: String(args.note || ""),
       citation: String(args.citation || ""),
     });
-    saveWorkspace(workspace);
+    saveWorkspace(workspace, storageFile);
 
     return toolText({
       ok: true,
@@ -404,12 +393,6 @@ function handleToolCall(name, args) {
         continue;
       }
 
-      const projectLevel = project.entryIds.map((entryId) => ({
-        entry: workspace.entries[entryId],
-        chapterId: null,
-        chapterTitle: "未分章",
-      }));
-
       const chapterLevel = project.chapterIds.flatMap((chapterId) => {
         const chapter = workspace.chapters[chapterId];
         if (!chapter) {
@@ -422,7 +405,7 @@ function handleToolCall(name, args) {
         }));
       });
 
-      for (const item of [...projectLevel, ...chapterLevel]) {
+      for (const item of chapterLevel) {
         const entry = item.entry;
         if (!entry) {
           continue;
@@ -489,10 +472,18 @@ function handleToolCall(name, args) {
   throw new Error(`未知工具：${name}`);
 }
 
+// MCP 的 stdio 傳輸使用「一行一則 JSON」(NDJSON)；舊版本只實作了 LSP 式的
+// Content-Length 標頭，導致任何 MCP 客戶端都連不上。這裡兩種都支援：
+// 依客戶端送來的框格式回覆，預設 NDJSON。
+let useContentLengthFraming = false;
+
 function sendMessage(payload) {
   const json = JSON.stringify(payload);
-  const header = `Content-Length: ${Buffer.byteLength(json, "utf8")}\r\n\r\n`;
-  process.stdout.write(header + json);
+  if (useContentLengthFraming) {
+    process.stdout.write(`Content-Length: ${Buffer.byteLength(json, "utf8")}\r\n\r\n` + json);
+  } else {
+    process.stdout.write(json + "\n");
+  }
 }
 
 function sendResult(id, result) {
@@ -589,9 +580,31 @@ async function handleRequest(request) {
 
 let buffer = Buffer.alloc(0);
 
-process.stdin.on("data", (chunk) => {
-  buffer = Buffer.concat([buffer, chunk]);
+function dispatch(payload) {
+  let request;
+  try {
+    request = JSON.parse(payload);
+  } catch {
+    return;
+  }
+  void handleRequest(request);
+}
 
+function drainNdjson() {
+  while (true) {
+    const newlineIndex = buffer.indexOf("\n");
+    if (newlineIndex === -1) {
+      return;
+    }
+    const line = buffer.slice(0, newlineIndex).toString("utf8").trim();
+    buffer = buffer.slice(newlineIndex + 1);
+    if (line) {
+      dispatch(line);
+    }
+  }
+}
+
+function drainContentLength() {
   while (true) {
     const headerEnd = buffer.indexOf("\r\n\r\n");
     if (headerEnd === -1) {
@@ -615,15 +628,28 @@ process.stdin.on("data", (chunk) => {
 
     const payload = buffer.slice(messageStart, messageEnd).toString("utf8");
     buffer = buffer.slice(messageEnd);
+    dispatch(payload);
+  }
+}
 
-    let request;
-    try {
-      request = JSON.parse(payload);
-    } catch {
-      continue;
+let framingDetected = false;
+
+process.stdin.on("data", (chunk) => {
+  buffer = Buffer.concat([buffer, chunk]);
+
+  if (!framingDetected) {
+    const head = buffer.slice(0, 32).toString("utf8").trimStart();
+    if (head.length === 0) {
+      return;
     }
+    useContentLengthFraming = /^Content-Length:/i.test(head);
+    framingDetected = true;
+  }
 
-    void handleRequest(request);
+  if (useContentLengthFraming) {
+    drainContentLength();
+  } else {
+    drainNdjson();
   }
 });
 

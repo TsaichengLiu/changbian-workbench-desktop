@@ -16,7 +16,7 @@ export type SearchScope =
 
 export interface SearchResult {
   projectId: string;
-  chapterId: string | null;
+  chapterId: string;
   entryId: string;
   projectTitle: string;
   chapterTitle: string;
@@ -32,6 +32,8 @@ export interface SearchCriteria {
   queryScopes?: SearchScope[];
   tag: string;
   citationTitle: string;
+  projectId?: string;
+  chapterId?: string;
 }
 
 export interface IndexedEntry extends SearchResult {
@@ -104,7 +106,7 @@ function flattenUniqueVariants(values: string[]): string[] {
 
 function toIndexedEntry(
   projectId: string,
-  chapterId: string | null,
+  chapterId: string,
   entryId: string,
   projectTitle: string,
   chapterTitle: string,
@@ -148,27 +150,6 @@ export function buildSearchIndex(workspace: WorkspaceData): IndexedEntry[] {
     const project = workspace.projects[projectId];
     if (!project) {
       continue;
-    }
-
-    for (const entryId of project.entryIds) {
-      const entry = workspace.entries[entryId];
-      if (!entry) {
-        continue;
-      }
-      output.push(
-        toIndexedEntry(
-          project.id,
-          null,
-          entry.id,
-          project.title,
-          "未分章",
-          entry.timeText,
-          entry.summary,
-          entry.sourceText,
-          entry.note,
-          entry.citation,
-        ),
-      );
     }
 
     for (const chapterId of project.chapterIds) {
@@ -225,6 +206,13 @@ export function searchInIndex(index: IndexedEntry[], criteria: SearchCriteria): 
   const results: SearchResult[] = [];
 
   for (const item of index) {
+    if (criteria.projectId && item.projectId !== criteria.projectId) {
+      continue;
+    }
+    if (criteria.chapterId && item.chapterId !== criteria.chapterId) {
+      continue;
+    }
+
     const queryPass = query
       ? queryScopes.some((scope) => matchesVariants(item.scopeVariants[scope], queryVariants))
       : true;

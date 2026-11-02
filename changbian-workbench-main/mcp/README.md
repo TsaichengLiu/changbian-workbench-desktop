@@ -19,7 +19,8 @@ npm run mcp:start
 - `add_entry`
 - `search_entries`
 
-`add_entry` 支持欄位：`time_text`、`summary`、`source_text`、`note`、`citation`。  
+`add_entry` 必填 `project_id`、`chapter_id`、`source_text`；史料一律錄入章節之下，不存在「未分章」的專案層級史料。  
+其餘欄位：`time_text`、`summary`、`note`、`citation`。  
 `search_entries` 的關鍵詞會匹配時間、摘要、史料文本、備註、引文註釋。
 
 示例（MCP 客戶端配置片段）：
