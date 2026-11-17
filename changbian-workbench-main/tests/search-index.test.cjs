@@ -80,3 +80,26 @@ test("SQLite 搜尋同時支持 FTS 長詞、短詞 fallback 與標籤", () => {
     fs.rmSync(directory, { recursive: true, force: true });
   }
 });
+
+test("SQLite 搜尋忽略標點，空格分隔的多個詞須同時命中", () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "changbian-search-"));
+  const workspacePath = path.join(directory, "workspace.json");
+  const service = new SearchIndexService({ getWorkspaceFilePath: () => workspacePath });
+  const search = (query) => service.search({ query, tag: "", citationTitle: "" });
+  try {
+    assert.equal(service.syncWorkspace(workspaceFixture()), true);
+    // 原文「萬曆改革，整飭吏治。」有句讀，查詢沒有句讀也要命中，反之亦然。
+    assert.equal(search("改革整飭吏治").length, 1);
+    assert.equal(search("主持，萬曆").length, 1);
+    assert.equal(search("改革，整").length, 1);
+    assert.equal(search("張居正 吏治").length, 1);
+    assert.equal(search("张居正 吏治").length, 1);
+    assert.equal(search("張居正 海瑞").length, 0);
+    assert.equal(search("。，").length, 0);
+    const scoped = service.search({ query: "改革整飭", tag: "", citationTitle: "", queryScopes: ["note"] });
+    assert.equal(scoped.length, 0);
+  } finally {
+    service.close();
+    fs.rmSync(directory, { recursive: true, force: true });
+  }
+});

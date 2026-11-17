@@ -36,9 +36,27 @@ try {
   cnToTwConverter = null;
 }
 
+// 與 src/search.ts 一致：比對時忽略標點、符號與空白，保留 □ ■ 缺字符號。
+const IGNORABLE_CHARS = /(?![□■])[\p{P}\p{S}\p{Z}\p{Cc}\p{Cf}]/gu;
+
 function cleanText(input) {
   const text = typeof input === "string" ? input : input == null ? "" : String(input);
-  return text.toLocaleLowerCase().replace(/\s+/g, " ").trim();
+  return text.toLocaleLowerCase().replace(IGNORABLE_CHARS, "");
+}
+
+// 查詢以空白分隔為多個詞，每個詞都須命中。
+function splitQueryTerms(query) {
+  return query.split(/\s+/).filter(Boolean);
+}
+
+// 索引以 detail='none' 建立，不支持多字片語查詢；改以詞中每個三字片段 AND 起來預篩。
+function trigramMatchExpression(variant) {
+  const chars = [...variant];
+  const grams = new Set();
+  for (let index = 0; index + 3 <= chars.length; index += 1) {
+    grams.add(chars.slice(index, index + 3).join(""));
+  }
+  return `(${[...grams].map((gram) => `"${gram.replace(/"/g, '""')}"`).join(" AND ")})`;
 }
 
 function buildVariants(input) {
@@ -744,7 +762,11 @@ class SearchIndexService {
     const projectId = typeof criteria?.projectId === "string" ? criteria.projectId.trim() : "";
     const chapterId = typeof criteria?.chapterId === "string" ? criteria.chapterId.trim() : "";
 
-    if (!query && !normalizedTag && !citationTitle) {
+    // 每個詞各自展開繁簡變體；只有標點的詞不參與比對。
+    const queryTermVariants = splitQueryTerms(query)
+      .map((term) => buildVariants(term))
+      .filter((variants) => variants.length > 0);
+    if (queryTermVariants.length === 0 && !normalizedTag && !citationTitle) {
       return [];
     }
 
@@ -764,41 +786,26 @@ class SearchIndexService {
       params.push(chapterId);
     }
 
-    if (query) {
-      const queryVariants = buildVariants(query);
-      if (queryVariants.length === 0) {
-        return [];
-      }
+    if (queryTermVariants.length > 0) {
       const scopeColumns = this.buildQueryScopeColumns(criteria?.queryScopes);
-      const canUseFts = queryVariants.every((variant) => [...variant].length >= 3);
-
-      if (canUseFts) {
-        const terms = queryVariants.map((variant) => `"${variant.replace(/"/g, '""')}"`);
-        if (terms.length === 0) return [];
+      // 三字以上的詞先用 trigram 索引預篩，再逐詞以 LIKE 確認落在指定欄位；
+      // 標點已在索引與查詢兩側去掉，所以 LIKE 的 % _ 不會出現在詞中。
+      const ftsGroups = queryTermVariants
+        .filter((variants) => variants.every((variant) => [...variant].length >= 3))
+        .map((variants) => `(${variants.map(trigramMatchExpression).join(" OR ")})`);
+      if (ftsGroups.length > 0) {
         whereClauses.push("entries_fts MATCH ?");
-        params.push(terms.join(" OR "));
-        if (scopeColumns.length < ALL_SCOPES.length) {
-          const scopedChecks = [];
-          for (const variant of queryVariants) {
-            for (const column of scopeColumns) {
-              scopedChecks.push(`${column} LIKE ?`);
-              params.push(`%${variant}%`);
-            }
-          }
-          if (scopedChecks.length > 0) whereClauses.push(`(${scopedChecks.join(" OR ")})`);
-        }
-      } else {
-        const variantGroups = [];
-        for (const variant of queryVariants) {
-          const columnChecks = [];
+        params.push(ftsGroups.join(" AND "));
+      }
+      for (const variants of queryTermVariants) {
+        const checks = [];
+        for (const variant of variants) {
           for (const column of scopeColumns) {
-            columnChecks.push(`${column} LIKE ?`);
+            checks.push(`${column} LIKE ?`);
             params.push(`%${variant}%`);
           }
-          if (columnChecks.length > 0) variantGroups.push(`(${columnChecks.join(" OR ")})`);
         }
-        if (variantGroups.length === 0) return [];
-        whereClauses.push(`(${variantGroups.join(" OR ")})`);
+        whereClauses.push(`(${checks.join(" OR ")})`);
       }
     }
 

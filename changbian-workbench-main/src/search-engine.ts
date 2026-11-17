@@ -1,4 +1,4 @@
-import { buildVariants } from "./search";
+import { buildVariants, splitQueryTerms } from "./search";
 import type { WorkspaceData } from "./types";
 import { summarize } from "./utils";
 
@@ -197,11 +197,14 @@ export function searchInIndex(index: IndexedEntry[], criteria: SearchCriteria): 
     "citation",
   ];
 
-  if (!query && !normalizedTag && !citationTitle) {
+  // 每個詞各自展開繁簡變體；只有標點的詞不參與比對。
+  const queryTermVariants = splitQueryTerms(query)
+    .map((term) => buildVariants(term))
+    .filter((variants) => variants.length > 0);
+  if (queryTermVariants.length === 0 && !normalizedTag && !citationTitle) {
     return [];
   }
 
-  const queryVariants = buildVariants(query);
   const citationTitleVariants = buildVariants(citationTitle);
   const results: SearchResult[] = [];
 
@@ -213,9 +216,9 @@ export function searchInIndex(index: IndexedEntry[], criteria: SearchCriteria): 
       continue;
     }
 
-    const queryPass = query
-      ? queryScopes.some((scope) => matchesVariants(item.scopeVariants[scope], queryVariants))
-      : true;
+    const queryPass = queryTermVariants.every((variants) =>
+      queryScopes.some((scope) => matchesVariants(item.scopeVariants[scope], variants)),
+    );
     if (!queryPass) {
       continue;
     }
