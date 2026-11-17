@@ -1,7 +1,7 @@
 const path = require("path");
 const fs = require("fs");
 const os = require("os");
-const { app, BrowserWindow, Menu, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain } = require("electron");
 const { SearchIndexService } = require("./search-index.cjs");
 const { readWorkspaceFile, validateWorkspace, writeWorkspaceFile } = require("./workspace-store.cjs");
 
@@ -427,6 +427,11 @@ function setApplicationMenu() {
 }
 
 ipcMain.handle("workspace:load-shared", () => loadSharedWorkspace());
+// 「複製引用」：經由主程序寫入系統剪貼簿，不受網頁焦點與權限限制。
+ipcMain.handle("clipboard:write-text", (_event, text) => {
+  clipboard.writeText(String(text ?? ""));
+  return true;
+});
 ipcMain.handle("workspace:save-shared", (_event, workspace, expectedRevision) =>
   saveSharedWorkspace(workspace, expectedRevision),
 );

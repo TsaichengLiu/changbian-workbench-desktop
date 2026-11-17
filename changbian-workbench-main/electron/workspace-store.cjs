@@ -21,6 +21,81 @@ function asNullableId(value, field, errors) {
   return null;
 }
 
+// ── 條目編號（與 src/entry-refs.ts 規則一致）──
+// 編號取建立時間（本機時區）的年月日時分秒共 14 位；同一秒的順延一秒直到不重複。已分配的編號不再變動。
+const REF_ID_PATTERN = /^\d{14}$/;
+
+function pad(value, width = 2) {
+  return String(value).padStart(width, "0");
+}
+
+function formatEntryRefId(timestamp) {
+  const date = new Date(Number.isFinite(timestamp) ? timestamp : Date.now());
+  return (
+    pad(date.getFullYear(), 4) +
+    pad(date.getMonth() + 1) +
+    pad(date.getDate()) +
+    pad(date.getHours()) +
+    pad(date.getMinutes()) +
+    pad(date.getSeconds())
+  );
+}
+
+function nextFreeEntryRefId(createdAt, used) {
+  let time = Number.isFinite(createdAt) ? createdAt : Date.now();
+  let candidate = formatEntryRefId(time);
+  while (used.has(candidate)) {
+    time += 1000;
+    candidate = formatEntryRefId(time);
+  }
+  return candidate;
+}
+
+// 回收站中條目的編號：恢復時要用回，不能分給新條目。
+function trashedEntryRefIds(trash) {
+  const refIds = [];
+  for (const item of Array.isArray(trash) ? trash : []) {
+    const payload = isRecord(item) ? item.payload : null;
+    const list = isRecord(payload) && Array.isArray(payload.entries) ? payload.entries : [];
+    for (const element of list) {
+      const entry = payload.kind === "entry" && isRecord(element) ? element.entry : element;
+      if (isRecord(entry) && typeof entry.refId === "string") {
+        refIds.push(entry.refId);
+      }
+    }
+  }
+  return refIds;
+}
+
+// 補齊缺少或重複的編號（就地修改）；已有且不重複的保持不變，重複時按建立時間（其次 id）先到先得。
+function assignEntryRefIds(entries, reserved = []) {
+  const ordered = Object.values(entries).sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id));
+  const used = new Set(reserved);
+  const pending = [];
+  for (const entry of ordered) {
+    if (typeof entry.refId === "string" && REF_ID_PATTERN.test(entry.refId) && !used.has(entry.refId)) {
+      used.add(entry.refId);
+    } else {
+      pending.push(entry);
+    }
+  }
+  for (const entry of pending) {
+    entry.refId = nextFreeEntryRefId(entry.createdAt, used);
+    used.add(entry.refId);
+  }
+  return pending.length;
+}
+
+function usedEntryRefIds(workspace) {
+  const used = new Set(trashedEntryRefIds(workspace.trash));
+  for (const entry of Object.values(workspace.entries || {})) {
+    if (isRecord(entry) && typeof entry.refId === "string") {
+      used.add(entry.refId);
+    }
+  }
+  return used;
+}
+
 // 舊資料可能存在「未分章史料」（entry.chapterId 為 null，或掛在 project.entryIds 上）。
 // 該設計已廢棄，讀取時一律遷入該專案下一個名為「未分章」的真章節，使 chapterId 恆為字串。
 function migrateUngroupedEntries(projects, chapters, entries, legacyProjectEntryIds) {
@@ -179,8 +254,11 @@ function validateWorkspace(raw) {
     })
     .sort((a, b) => b.deletedAt - a.deletedAt)
     .slice(0, TRASH_ITEM_LIMIT);
+  const refIdsAssigned = assignEntryRefIds(entries, trashedEntryRefIds(trash));
   return {
     ok: true,
+    // 讀入時補上或改動了編號：應儘快寫回，使編號固定下來。
+    refIdsAssigned,
     workspace: {
       ...raw,
       schemaVersion: WORKSPACE_SCHEMA_VERSION,
@@ -205,7 +283,12 @@ function readWorkspaceFile(filePath) {
     if (!validation.ok) {
       return { ok: false, error: `資料格式無效：${validation.errors.slice(0, 4).join("；")}` };
     }
-    return { ok: true, workspace: validation.workspace, revision: validation.workspace.revision };
+    return {
+      ok: true,
+      workspace: validation.workspace,
+      revision: validation.workspace.revision,
+      needsSave: validation.refIdsAssigned > 0,
+    };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? `JSON 讀取失敗：${error.message}` : "JSON 讀取失敗" };
   }
@@ -285,6 +368,9 @@ function writeWorkspaceFile(filePath, workspace, options = {}) {
 
 module.exports = {
   WORKSPACE_SCHEMA_VERSION,
+  formatEntryRefId,
+  nextFreeEntryRefId,
+  usedEntryRefIds,
   readWorkspaceFile,
   validateWorkspace,
   writeWorkspaceFile,

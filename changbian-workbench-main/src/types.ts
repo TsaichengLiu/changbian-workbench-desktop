@@ -1,5 +1,7 @@
 export interface Entry {
   id: string;
+  // 供備註互相引用的編號：建立時間的年月日時分秒（14 位），見 entry-refs.ts。
+  refId: string;
   projectId: string;
   chapterId: string;
   timeText: string;

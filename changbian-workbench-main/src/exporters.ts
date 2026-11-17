@@ -1,6 +1,8 @@
 import {
+  Bookmark,
   Document,
   HeadingLevel,
+  InternalHyperlink,
   Packer,
   Paragraph,
   TableOfContents,
@@ -10,6 +12,7 @@ import {
   type FileChild,
 } from "docx";
 import * as XLSX from "xlsx";
+import { entryRefToken, splitEntryRefs } from "./entry-refs";
 import type { Chapter, Entry, OrderedEntryRef, Project, WorkspaceData } from "./types";
 import { downloadBlob, sanitizeFilename } from "./utils";
 
@@ -71,6 +74,43 @@ function exportLabel(workspace: WorkspaceData, scope: ExportScope): string {
 
 function entryHeadline(entry: Entry): string {
   return entry.timeText || "未著錄時間";
+}
+
+// ── 條目互相鏈接 ──
+// 匯出後脫離工作臺閱讀，[[編號]] 後附上目標條目的標題。
+function refTitle(entry: Entry): string {
+  return [entry.timeText || "未著錄時間", entry.summary.trim()].filter(Boolean).join("｜");
+}
+
+function buildRefIndex(workspace: WorkspaceData): Map<string, Entry> {
+  const index = new Map<string, Entry>();
+  for (const entry of Object.values(workspace.entries)) {
+    index.set(entry.refId, entry);
+  }
+  return index;
+}
+
+function describeEntryRefs(text: string, refIndex: Map<string, Entry>): string {
+  return splitEntryRefs(text)
+    .map((part, index) => {
+      if (index % 2 === 0) {
+        return part;
+      }
+      const target = refIndex.get(part);
+      return target ? `${entryRefToken(part)}〈${refTitle(target)}〉` : entryRefToken(part);
+    })
+    .join("");
+}
+
+// Word 書籤名：須以字母開頭。
+function refBookmarkId(refId: string): string {
+  return `ref_${refId}`;
+}
+
+interface DocxRefContext {
+  refIndex: Map<string, Entry>;
+  // 本次匯出中包含的條目編號：鏈接到它們時做成文檔內跳轉。
+  exportedRefIds: Set<string>;
 }
 
 interface MarkupSegment {
@@ -184,6 +224,7 @@ const DOCX_LINE_SPACING = 400; // 20pt 行距（twips）
 
 export function exportAsTxt(workspace: WorkspaceData, scope: ExportScope): void {
   const projects = getExportProjects(workspace, scope);
+  const refIndex = buildRefIndex(workspace);
   const lines: string[] = ["長編工作臺匯出", ""];
 
   for (const project of projects) {
@@ -201,12 +242,13 @@ export function exportAsTxt(workspace: WorkspaceData, scope: ExportScope): void 
           return;
         }
         lines.push(`### ${index + 1}. ${entryHeadline(entry)}`);
+        lines.push(`編號：${entry.refId}`);
         lines.push("摘要：");
         lines.push(entry.summary || "");
         lines.push("史料文本：");
         lines.push(entry.sourceText || "");
         lines.push("備註：");
-        lines.push(entry.note || "");
+        lines.push(describeEntryRefs(entry.note || "", refIndex));
         lines.push("引文註釋：");
         lines.push(entry.citation || "");
         lines.push("");
@@ -221,16 +263,61 @@ export function exportAsTxt(workspace: WorkspaceData, scope: ExportScope): void 
   downloadBlob(new Blob([content], { type: "text/plain;charset=utf-8" }), `${filename}.txt`);
 }
 
-function appendEntryParagraphs(children: FileChild[], order: number, entry: Entry): void {
+// 備註：文字照舊；[[編號]] 指向本次匯出中的條目時做成文檔內連結，否則保留編號並附標題。
+function noteRuns(note: string, font: IRunOptions["font"], context: DocxRefContext): Array<TextRun | InternalHyperlink> {
+  if (!note) {
+    return plainTextRuns("（無）", { font });
+  }
+  return splitEntryRefs(note).flatMap((part, index): Array<TextRun | InternalHyperlink> => {
+    if (index % 2 === 0) {
+      return part ? plainTextRuns(part, { font }) : [];
+    }
+    const target = context.refIndex.get(part);
+    if (!target) {
+      return [new TextRun({ text: entryRefToken(part), font })];
+    }
+    if (!context.exportedRefIds.has(part)) {
+      return [new TextRun({ text: `${entryRefToken(part)}〈${refTitle(target)}〉`, font })];
+    }
+    return [
+      new InternalHyperlink({
+        anchor: refBookmarkId(part),
+        children: [
+          new TextRun({
+            text: `→${refTitle(target)}`,
+            font,
+            color: DOCX_HIGHLIGHT_COLOR,
+            underline: { type: UnderlineType.SINGLE },
+          }),
+        ],
+      }),
+    ];
+  });
+}
+
+function appendEntryParagraphs(children: FileChild[], order: number, entry: Entry, context: DocxRefContext): void {
   const sharedIndent = DOCX_INDENT.entry;
   const summaryLabel = entry.summary.trim() || "（無摘要）";
 
   children.push(
     new Paragraph({
-      text: `${order}. ${entryHeadline(entry)}｜${summaryLabel}`,
       heading: HeadingLevel.HEADING_3,
       indent: { left: sharedIndent },
-      spacing: { before: 80, after: 60, line: DOCX_LINE_SPACING },
+      spacing: { before: 80, after: 20, line: DOCX_LINE_SPACING },
+      children: [
+        new Bookmark({
+          id: refBookmarkId(entry.refId),
+          children: [new TextRun({ text: `${order}. ${entryHeadline(entry)}｜${summaryLabel}` })],
+        }),
+      ],
+    }),
+  );
+
+  children.push(
+    new Paragraph({
+      indent: { left: sharedIndent },
+      spacing: { after: 60 },
+      children: [new TextRun({ text: `編號 ${entry.refId}`, size: 18, color: "7A8A8E" })],
     }),
   );
 
@@ -253,7 +340,7 @@ function appendEntryParagraphs(children: FileChild[], order: number, entry: Entr
       children: [
         new TextRun({ text: "備註：", bold: true, font: KAITI_FONT }),
         new TextRun({ text: "", break: 1 }),
-        ...plainTextRuns(entry.note || "（無）", { font: KAITI_FONT }),
+        ...noteRuns(entry.note, KAITI_FONT, context),
       ],
     }),
   );
@@ -273,6 +360,12 @@ function appendEntryParagraphs(children: FileChild[], order: number, entry: Entr
 
 export async function exportAsDocx(workspace: WorkspaceData, scope: ExportScope): Promise<void> {
   const projects = getExportProjects(workspace, scope);
+  const context: DocxRefContext = {
+    refIndex: buildRefIndex(workspace),
+    exportedRefIds: new Set(
+      projects.flatMap((project) => collectEntriesForProject(workspace, project).map((item) => item.entry.refId)),
+    ),
+  };
   const children: FileChild[] = [
     new Paragraph({
       text: "長編工作臺匯出",
@@ -333,7 +426,7 @@ export async function exportAsDocx(workspace: WorkspaceData, scope: ExportScope)
       );
 
       for (const entry of group.entries) {
-        appendEntryParagraphs(children, order, entry);
+        appendEntryParagraphs(children, order, entry, context);
         order += 1;
       }
     }
@@ -405,12 +498,14 @@ export async function exportAsDocx(workspace: WorkspaceData, scope: ExportScope)
 
 export function exportAsXlsx(workspace: WorkspaceData, scope: ExportScope): void {
   const projects = getExportProjects(workspace, scope);
+  const refIndex = buildRefIndex(workspace);
 
   const rows: Array<Array<string | number>> = [
     [
       "專案",
       "章節",
       "序號",
+      "編號",
       "時間",
       "摘要",
       "史料文本",
@@ -428,10 +523,11 @@ export function exportAsXlsx(workspace: WorkspaceData, scope: ExportScope): void
         project.title,
         item.chapter?.title ?? "",
         item.order,
+        item.entry.refId,
         item.entry.timeText,
         item.entry.summary,
         item.entry.sourceText,
-        item.entry.note,
+        describeEntryRefs(item.entry.note, refIndex),
         item.entry.citation,
         formatDate(item.entry.createdAt),
         formatDate(item.entry.updatedAt),
@@ -444,6 +540,7 @@ export function exportAsXlsx(workspace: WorkspaceData, scope: ExportScope): void
     { wch: 20 },
     { wch: 20 },
     { wch: 8 },
+    { wch: 16 },
     { wch: 24 },
     { wch: 36 },
     { wch: 70 },

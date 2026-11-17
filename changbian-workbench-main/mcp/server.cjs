@@ -5,6 +5,8 @@ const path = require("path");
 const os = require("os");
 const {
   WORKSPACE_SCHEMA_VERSION,
+  nextFreeEntryRefId,
+  usedEntryRefIds,
   readWorkspaceFile,
   writeWorkspaceFile,
 } = require("../electron/workspace-store.cjs");
@@ -161,6 +163,7 @@ function appendEntry(workspace, payload) {
   const now = Date.now();
   workspace.entries[entryId] = {
     id: entryId,
+    refId: nextFreeEntryRefId(now, usedEntryRefIds(workspace)),
     projectId: payload.projectId,
     chapterId: payload.chapterId,
     timeText: payload.timeText || "",

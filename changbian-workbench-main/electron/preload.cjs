@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld("workspaceBridge", {
   exportWorkspaceFile: (workspace, suggestedFileName) =>
     ipcRenderer.invoke("workspace:export-file", workspace, suggestedFileName),
   importWorkspaceFile: () => ipcRenderer.invoke("workspace:import-file"),
+  writeClipboardText: (text) => ipcRenderer.invoke("clipboard:write-text", text),
   onExternalWorkspaceChanged: (handler) => {
     if (typeof handler !== "function") {
       return () => {};

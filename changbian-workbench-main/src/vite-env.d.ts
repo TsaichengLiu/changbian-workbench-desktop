@@ -11,6 +11,8 @@ interface WorkspaceBridge {
     workspace?: unknown;
     revision?: number;
     error?: string;
+    // 讀入時補上了條目編號，需要寫回資料檔。
+    needsSave?: boolean;
   }>;
   saveSharedWorkspace: (
     workspace: unknown,
@@ -48,6 +50,8 @@ interface WorkspaceBridge {
     error?: string;
     data?: unknown;
   }>;
+  // 桌面版：經由主程序寫入系統剪貼簿。
+  writeClipboardText?: (text: string) => Promise<boolean>;
   onExternalWorkspaceChanged?: (
     handler: (payload: { revision?: number }) => void,
   ) => () => void;
