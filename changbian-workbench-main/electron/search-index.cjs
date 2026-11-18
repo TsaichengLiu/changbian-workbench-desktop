@@ -6,8 +6,16 @@ const CITATION_TITLE_REGEX = /《([^》\n\r]+)》/g;
 const SEARCH_REBUILD_DEBOUNCE_MS = 900;
 const SEARCH_LIMIT_DEFAULT = 600;
 const INCREMENTAL_REBUILD_THRESHOLD = 2400;
+// 索引格式版本（存於 PRAGMA user_version）；變量寫法等改變時遞增，舊索引會整個重建。
+// 2：條目簽名存進 entry_row_map，重啟後只更新改動的條目。
+const INDEX_FORMAT_VERSION = 2;
+// 空閒頁超過這個比例（且超過最少頁數）時壓縮資料庫檔案。
+const VACUUM_FREE_RATIO = 0.25;
+const VACUUM_MIN_FREE_PAGES = 256;
+// WAL 檔在檢查點之後截短到此大小以內，不隨歷次寫入一直變大。
+const WAL_SIZE_LIMIT_BYTES = 4 * 1024 * 1024;
 
-const ALL_SCOPES = ["project", "chapter", "time", "summary", "source", "note", "citation"];
+const ALL_SCOPES = ["project", "chapter", "time", "summary", "source", "note", "citation", "refId"];
 
 const SCOPE_COLUMN_MAP = Object.freeze({
   project: "project_variants",
@@ -17,6 +25,7 @@ const SCOPE_COLUMN_MAP = Object.freeze({
   source: "source_variants",
   note: "note_variants",
   citation: "citation_variants",
+  refId: "ref_variants",
 });
 
 let BetterSqlite3 = null;
@@ -26,14 +35,31 @@ try {
   BetterSqlite3 = null;
 }
 
-let twToCnConverter = null;
-let cnToTwConverter = null;
-try {
-  twToCnConverter = OpenCC.Converter({ from: "tw", to: "cn" });
-  cnToTwConverter = OpenCC.Converter({ from: "cn", to: "tw" });
-} catch {
-  twToCnConverter = null;
-  cnToTwConverter = null;
+// 繁簡轉換詞典（兩個方向約佔 30 MB）在第一次用到時才載入：
+// 啟動時索引已是最新、又沒有檢索或改動條目時，就不必載入。
+let twToCnConverter;
+let cnToTwConverter;
+
+function convertToSimplified(input) {
+  if (twToCnConverter === undefined) {
+    try {
+      twToCnConverter = OpenCC.Converter({ from: "tw", to: "cn" });
+    } catch {
+      twToCnConverter = null;
+    }
+  }
+  return twToCnConverter ? twToCnConverter(input) : null;
+}
+
+function convertToTraditional(input) {
+  if (cnToTwConverter === undefined) {
+    try {
+      cnToTwConverter = OpenCC.Converter({ from: "cn", to: "tw" });
+    } catch {
+      cnToTwConverter = null;
+    }
+  }
+  return cnToTwConverter ? cnToTwConverter(input) : null;
 }
 
 // 與 src/search.ts 一致：比對時忽略標點、符號與空白，保留 □ ■ 缺字符號。
@@ -65,12 +91,16 @@ function buildVariants(input) {
     return [];
   }
 
+  // 原文、轉簡體、轉繁體三種寫法都存：有些字繁簡不是一一對應（如 暱／昵、藉／借），
+  // 只存簡體會漏檢。
   const variants = new Set([base]);
-  if (twToCnConverter) {
-    variants.add(cleanText(twToCnConverter(input)));
+  const simplified = convertToSimplified(input);
+  if (simplified !== null) {
+    variants.add(cleanText(simplified));
   }
-  if (cnToTwConverter) {
-    variants.add(cleanText(cnToTwConverter(input)));
+  const traditional = convertToTraditional(input);
+  if (traditional !== null) {
+    variants.add(cleanText(traditional));
   }
   return [...variants].filter(Boolean);
 }
@@ -189,6 +219,7 @@ function buildEntrySignature(entry) {
     typeof entry.sourceText === "string" ? entry.sourceText : "",
     typeof entry.note === "string" ? entry.note : "",
     typeof entry.citation === "string" ? entry.citation : "",
+    typeof entry.refId === "string" ? entry.refId : "",
   ]);
 }
 
@@ -223,6 +254,7 @@ function resolveEntryContext(workspace, entryId) {
     sourceText: typeof rawEntry.sourceText === "string" ? rawEntry.sourceText : "",
     noteText: typeof rawEntry.note === "string" ? rawEntry.note : "",
     citationText: typeof rawEntry.citation === "string" ? rawEntry.citation : "",
+    refId: typeof rawEntry.refId === "string" ? rawEntry.refId : "",
   };
 }
 
@@ -250,6 +282,7 @@ function buildEntryIndexPayload(context) {
     sourceVariants: joinVariants(context.sourceText),
     noteVariants: joinVariants(context.noteText),
     citationVariants: joinVariants(context.citationText),
+    refVariants: context.refId,
   };
 }
 
@@ -270,54 +303,29 @@ function iterateWorkspaceEntryIds(workspace) {
   return ids;
 }
 
-function buildWorkspaceSnapshot(workspace) {
+// 每條的索引簽名：條目內容加上所屬專案、章節的名稱（改名時須重建該條）。
+function buildRowSignatures(workspace) {
   const entries = getWorkspaceBucket(workspace, "entries");
   const projects = getWorkspaceBucket(workspace, "projects");
   const chapters = getWorkspaceBucket(workspace, "chapters");
-
-  const entrySignatures = new Map();
-  const entryProjectIds = new Map();
-  const entryChapterIds = new Map();
-
-  for (const key of Object.keys(entries)) {
-    const entry = entries[key];
+  const signatures = new Map();
+  for (const entryId of iterateWorkspaceEntryIds(workspace)) {
+    const entry = entries[entryId];
     if (!entry || typeof entry !== "object") {
       continue;
     }
-    const entryId = typeof entry.id === "string" ? entry.id : key;
-    if (!entryId) {
-      continue;
-    }
-    entrySignatures.set(entryId, buildEntrySignature(entry));
-    entryProjectIds.set(entryId, typeof entry.projectId === "string" ? entry.projectId : "");
-    entryChapterIds.set(entryId, typeof entry.chapterId === "string" ? entry.chapterId : "");
+    const project = typeof entry.projectId === "string" ? projects[entry.projectId] : null;
+    const chapter = typeof entry.chapterId === "string" ? chapters[entry.chapterId] : null;
+    signatures.set(
+      entryId,
+      JSON.stringify([
+        buildEntrySignature(entry),
+        project && typeof project.title === "string" ? project.title : "",
+        chapter && typeof chapter.title === "string" ? chapter.title : "",
+      ]),
+    );
   }
-
-  const projectTitles = new Map();
-  for (const projectId of Object.keys(projects)) {
-    const project = projects[projectId];
-    if (!project || typeof project !== "object") {
-      continue;
-    }
-    projectTitles.set(projectId, typeof project.title === "string" ? project.title : "");
-  }
-
-  const chapterTitles = new Map();
-  for (const chapterId of Object.keys(chapters)) {
-    const chapter = chapters[chapterId];
-    if (!chapter || typeof chapter !== "object") {
-      continue;
-    }
-    chapterTitles.set(chapterId, typeof chapter.title === "string" ? chapter.title : "");
-  }
-
-  return {
-    entrySignatures,
-    entryProjectIds,
-    entryChapterIds,
-    projectTitles,
-    chapterTitles,
-  };
+  return signatures;
 }
 
 class SearchIndexService {
@@ -335,12 +343,9 @@ class SearchIndexService {
     this.schemaInitialized = false;
     this.statements = null;
 
-    this.entrySignatures = new Map();
-    this.entryProjectIds = new Map();
-    this.entryChapterIds = new Map();
-    this.projectTitles = new Map();
-    this.chapterTitles = new Map();
-    this.workspaceSnapshotReady = false;
+    // 已寫入索引的各條簽名；首次同步時從資料庫讀出。
+    this.rowSignatures = new Map();
+    this.rowSignaturesReady = false;
   }
 
   getStatus() {
@@ -376,8 +381,10 @@ class SearchIndexService {
       this.db = new BetterSqlite3(this.dbPath);
       this.db.pragma("journal_mode = WAL");
       this.db.pragma("synchronous = NORMAL");
+      this.db.pragma(`journal_size_limit = ${WAL_SIZE_LIMIT_BYTES}`);
       this.initSchema();
       this.prepareStatements();
+      this.compactIfBloated();
       this.rowCount = this.getMappedRowCount();
       this.ready = true;
       this.lastError = "";
@@ -406,30 +413,67 @@ class SearchIndexService {
     this.ready = false;
     this.schemaInitialized = false;
     this.statements = null;
-    this.resetWorkspaceSnapshot();
+    this.rowSignatures = new Map();
+    this.rowSignaturesReady = false;
   }
 
-  resetWorkspaceSnapshot() {
-    this.entrySignatures = new Map();
-    this.entryProjectIds = new Map();
-    this.entryChapterIds = new Map();
-    this.projectTitles = new Map();
-    this.chapterTitles = new Map();
-    this.workspaceSnapshotReady = false;
+  // 整批刪改之後空閒頁會留在檔案裡；比例過高時壓縮，讓檔案回到實際大小。
+  compactIfBloated() {
+    if (!this.db) {
+      return false;
+    }
+    try {
+      const pageCount = Number(this.db.pragma("page_count", { simple: true })) || 0;
+      const freePages = Number(this.db.pragma("freelist_count", { simple: true })) || 0;
+      if (freePages < VACUUM_MIN_FREE_PAGES || freePages < pageCount * VACUUM_FREE_RATIO) {
+        return false;
+      }
+      this.db.exec("VACUUM");
+      this.db.pragma("wal_checkpoint(TRUNCATE)");
+      return true;
+    } catch {
+      return false;
+    }
   }
 
-  applyWorkspaceSnapshot(snapshot) {
-    this.entrySignatures = snapshot.entrySignatures;
-    this.entryProjectIds = snapshot.entryProjectIds;
-    this.entryChapterIds = snapshot.entryChapterIds;
-    this.projectTitles = snapshot.projectTitles;
-    this.chapterTitles = snapshot.chapterTitles;
-    this.workspaceSnapshotReady = true;
+  // 索引裡的簽名與實際行數一致才可信；不一致（例如上次中途失敗）就當作沒有，整個重建。
+  loadStoredSignatures() {
+    const stored = new Map();
+    if (!this.statements) {
+      return stored;
+    }
+    try {
+      for (const row of this.statements.selectAllRowMap.all()) {
+        if (typeof row.entry_id === "string" && typeof row.signature === "string" && row.signature) {
+          stored.set(row.entry_id, row.signature);
+        }
+      }
+      const ftsRows = Number(this.statements.countFts.get()?.count ?? 0);
+      if (ftsRows !== stored.size || this.getMappedRowCount() !== stored.size) {
+        return null;
+      }
+    } catch {
+      return null;
+    }
+    return stored;
   }
 
   initSchema() {
     if (!this.db || this.schemaInitialized) {
       return;
+    }
+
+    // 舊版索引（格式版本不同，或沒有「編號」欄）：刪掉重建。
+    const existingColumns = this.db
+      .prepare("PRAGMA table_info(entries_fts)")
+      .all()
+      .map((column) => column.name);
+    const formatVersion = Number(this.db.pragma("user_version", { simple: true })) || 0;
+    if (
+      existingColumns.length > 0 &&
+      (formatVersion !== INDEX_FORMAT_VERSION || !existingColumns.includes("ref_variants"))
+    ) {
+      this.db.exec("DROP TABLE IF EXISTS entries_fts; DROP TABLE IF EXISTS entry_row_map;");
     }
 
     this.db.exec(`
@@ -452,6 +496,7 @@ class SearchIndexService {
         source_variants,
         note_variants,
         citation_variants,
+        ref_variants,
         tokenize='trigram',
         detail='none',
         columnsize=0
@@ -461,12 +506,14 @@ class SearchIndexService {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS entry_row_map (
         entry_id TEXT PRIMARY KEY,
-        rowid INTEGER NOT NULL
+        rowid INTEGER NOT NULL,
+        signature TEXT NOT NULL DEFAULT ''
       );
     `);
     this.db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_entry_row_map_rowid ON entry_row_map(rowid);
     `);
+    this.db.pragma(`user_version = ${INDEX_FORMAT_VERSION}`);
 
     this.schemaInitialized = true;
   }
@@ -496,17 +543,20 @@ class SearchIndexService {
           summary_variants,
           source_variants,
           note_variants,
-          citation_variants
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          citation_variants,
+          ref_variants
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `),
       deleteFtsByRowid: this.db.prepare(`DELETE FROM entries_fts WHERE rowid = ?`),
       deleteFtsByEntryId: this.db.prepare(`DELETE FROM entries_fts WHERE entry_id = ?`),
       selectRowMap: this.db.prepare(`SELECT rowid FROM entry_row_map WHERE entry_id = ?`),
       upsertRowMap: this.db.prepare(`
-        INSERT INTO entry_row_map (entry_id, rowid)
-        VALUES (?, ?)
-        ON CONFLICT(entry_id) DO UPDATE SET rowid = excluded.rowid
+        INSERT INTO entry_row_map (entry_id, rowid, signature)
+        VALUES (?, ?, ?)
+        ON CONFLICT(entry_id) DO UPDATE SET rowid = excluded.rowid, signature = excluded.signature
       `),
+      selectAllRowMap: this.db.prepare(`SELECT entry_id, signature FROM entry_row_map`),
+      countFts: this.db.prepare(`SELECT COUNT(*) AS count FROM entries_fts`),
       deleteRowMap: this.db.prepare(`DELETE FROM entry_row_map WHERE entry_id = ?`),
       clearRowMap: this.db.prepare(`DELETE FROM entry_row_map`),
       countRowMap: this.db.prepare(`SELECT COUNT(*) AS count FROM entry_row_map`),
@@ -572,12 +622,15 @@ class SearchIndexService {
     this.statements.deleteRowMap.run(entryId);
   }
 
-  upsertEntryRowFromWorkspace(workspace, entryId) {
+  // fresh 為 true 表示表已清空（整批重建），不必先刪舊行。
+  upsertEntryRowFromWorkspace(workspace, entryId, signature, fresh = false) {
     if (!this.statements) {
       return;
     }
 
-    this.deleteEntryRow(entryId);
+    if (!fresh) {
+      this.deleteEntryRow(entryId);
+    }
 
     const context = resolveEntryContext(workspace, entryId);
     if (!context) {
@@ -604,10 +657,11 @@ class SearchIndexService {
       payload.sourceVariants,
       payload.noteVariants,
       payload.citationVariants,
+      payload.refVariants,
     );
 
     const rowid = Number(result.lastInsertRowid);
-    this.statements.upsertRowMap.run(payload.entryId, rowid);
+    this.statements.upsertRowMap.run(payload.entryId, rowid, signature || "");
   }
 
   rebuild(workspace) {
@@ -619,26 +673,32 @@ class SearchIndexService {
     }
 
     try {
-      const entryIds = iterateWorkspaceEntryIds(workspace);
+      const signatures = buildRowSignatures(workspace);
       const transaction = this.db.transaction(() => {
         this.db.exec("DELETE FROM entries_fts;");
         this.statements.clearRowMap.run();
 
-        for (const entryId of entryIds) {
-          this.upsertEntryRowFromWorkspace(workspace, entryId);
+        for (const [entryId, signature] of signatures) {
+          this.upsertEntryRowFromWorkspace(workspace, entryId, signature, true);
         }
       });
 
       transaction();
+      // 整批重寫後合併索引分段，並把騰出的空間還給磁碟。
+      this.db.exec("INSERT INTO entries_fts(entries_fts) VALUES('optimize');");
+      this.compactIfBloated();
       this.lastIndexedAt = Date.now();
       this.rowCount = this.getMappedRowCount();
       this.ready = true;
       this.lastError = "";
-      this.applyWorkspaceSnapshot(buildWorkspaceSnapshot(workspace));
+      this.rowSignatures = signatures;
+      this.rowSignaturesReady = true;
       return true;
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : "重建索引失敗";
       this.ready = false;
+      this.rowSignatures = new Map();
+      this.rowSignaturesReady = false;
       return false;
     }
   }
@@ -655,51 +715,32 @@ class SearchIndexService {
       return false;
     }
 
-    const nextSnapshot = buildWorkspaceSnapshot(workspace);
-
-    if (!this.workspaceSnapshotReady) {
-      return this.rebuild(workspace);
+    if (!this.rowSignaturesReady) {
+      const stored = this.loadStoredSignatures();
+      // 讀不出可信的簽名、或索引是空的（新檔）：整批建立。
+      if (!stored || stored.size === 0) {
+        return this.rebuild(workspace);
+      }
+      this.rowSignatures = stored;
+      this.rowSignaturesReady = true;
     }
 
+    const nextSignatures = buildRowSignatures(workspace);
     const removedEntryIds = [];
-    for (const entryId of this.entrySignatures.keys()) {
-      if (!nextSnapshot.entrySignatures.has(entryId)) {
+    for (const entryId of this.rowSignatures.keys()) {
+      if (!nextSignatures.has(entryId)) {
         removedEntryIds.push(entryId);
       }
     }
-
-    const renamedProjectIds = new Set();
-    for (const [projectId, title] of nextSnapshot.projectTitles.entries()) {
-      if (this.projectTitles.has(projectId) && this.projectTitles.get(projectId) !== title) {
-        renamedProjectIds.add(projectId);
+    const upsertEntryIds = [];
+    for (const [entryId, signature] of nextSignatures) {
+      if (this.rowSignatures.get(entryId) !== signature) {
+        upsertEntryIds.push(entryId);
       }
     }
 
-    const renamedChapterIds = new Set();
-    for (const [chapterId, title] of nextSnapshot.chapterTitles.entries()) {
-      if (this.chapterTitles.has(chapterId) && this.chapterTitles.get(chapterId) !== title) {
-        renamedChapterIds.add(chapterId);
-      }
-    }
-
-    const upsertEntrySet = new Set();
-    for (const [entryId, signature] of nextSnapshot.entrySignatures.entries()) {
-      const prevSignature = this.entrySignatures.get(entryId);
-      if (!prevSignature || prevSignature !== signature) {
-        upsertEntrySet.add(entryId);
-        continue;
-      }
-
-      const projectId = nextSnapshot.entryProjectIds.get(entryId);
-      const chapterId = nextSnapshot.entryChapterIds.get(entryId);
-      if ((projectId && renamedProjectIds.has(projectId)) || (chapterId && renamedChapterIds.has(chapterId))) {
-        upsertEntrySet.add(entryId);
-      }
-    }
-
-    const changesCount = removedEntryIds.length + upsertEntrySet.size;
+    const changesCount = removedEntryIds.length + upsertEntryIds.length;
     if (changesCount === 0) {
-      this.applyWorkspaceSnapshot(nextSnapshot);
       this.ready = true;
       this.lastError = "";
       return true;
@@ -710,13 +751,14 @@ class SearchIndexService {
     }
 
     try {
-      const upsertEntryIds = [...upsertEntrySet];
       const transaction = this.db.transaction(() => {
         for (const entryId of removedEntryIds) {
           this.deleteEntryRow(entryId);
         }
         for (const entryId of upsertEntryIds) {
-          this.upsertEntryRowFromWorkspace(workspace, entryId);
+          // 索引裡還沒有這條就直接插入，免得先按 entry_id 查刪。
+          const fresh = !this.rowSignatures.has(entryId);
+          this.upsertEntryRowFromWorkspace(workspace, entryId, nextSignatures.get(entryId), fresh);
         }
       });
 
@@ -725,11 +767,14 @@ class SearchIndexService {
       this.rowCount = this.getMappedRowCount();
       this.ready = true;
       this.lastError = "";
-      this.applyWorkspaceSnapshot(nextSnapshot);
+      this.rowSignatures = nextSignatures;
       return true;
     } catch (error) {
       this.lastError = error instanceof Error ? error.message : "增量索引更新失敗";
       this.ready = false;
+      // 不確定寫入了哪些：下次同步從資料庫重新核對。
+      this.rowSignatures = new Map();
+      this.rowSignaturesReady = false;
       return false;
     }
   }

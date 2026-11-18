@@ -30,6 +30,7 @@ const index = buildSearchIndex({
   entries: {
     e1: {
       id: "e1",
+      refId: "20260428000843",
       projectId: "p1",
       chapterId: "c1",
       timeText: "崇禎十七年秋",
@@ -40,12 +41,13 @@ const index = buildSearchIndex({
     },
     e2: {
       id: "e2",
+      refId: "20260428212241",
       projectId: "p1",
       chapterId: "c1",
       timeText: "崇禎十七年冬",
       summary: "高傑覆豪格書",
       sourceText: "史可法提兵救之，隨抵揚州。",
-      note: "",
+      note: "參見[[20260428000843]]",
       citation: "",
     },
   },
@@ -70,4 +72,19 @@ test("檢索：空格分隔的多個詞須同時命中，可跨欄位", () => {
 test("檢索：繁簡仍互通，只有標點的查詢不命中任何條目", () => {
   assert.deepEqual(ids("为明复仇"), ["e1"]);
   assert.deepEqual(ids("，。"), []);
+});
+
+test("檢索：可按編號找到條目；默認範圍也找得到在備註中鏈接它的條目", () => {
+  assert.deepEqual(ids("20260428212241"), ["e2"]);
+  assert.deepEqual(ids("20260428000843"), ["e1", "e2"]);
+  assert.deepEqual(ids("[[20260428000843]]"), ["e1", "e2"]);
+  // 編號是建立時間，查前幾位即按日期找。
+  assert.deepEqual(ids("20260428"), ["e1", "e2"]);
+  const onlyRefId = searchInIndex(index, {
+    query: "20260428000843",
+    queryScopes: ["refId"],
+    tag: "",
+    citationTitle: "",
+  }).map((result) => result.entryId);
+  assert.deepEqual(onlyRefId, ["e1"]);
 });

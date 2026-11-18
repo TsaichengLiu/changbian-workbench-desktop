@@ -12,7 +12,8 @@ export type SearchScope =
   | "summary"
   | "source"
   | "note"
-  | "citation";
+  | "citation"
+  | "refId";
 
 export interface SearchResult {
   projectId: string;
@@ -115,6 +116,7 @@ function toIndexedEntry(
   sourceText: string,
   note: string,
   citationText: string,
+  refId: string,
 ): IndexedEntry {
   const tags = extractTags(note);
   return {
@@ -136,6 +138,7 @@ function toIndexedEntry(
       source: buildVariants(sourceText),
       note: buildVariants(note),
       citation: buildVariants(citationText),
+      refId: refId ? [refId] : [],
     },
     tagLowerSet: tags.map((tag) => tag.toLocaleLowerCase()),
     citationTitleVariants: flattenUniqueVariants(extractCitationTitles(citationText)),
@@ -174,6 +177,7 @@ export function buildSearchIndex(workspace: WorkspaceData): IndexedEntry[] {
             entry.sourceText,
             entry.note,
             entry.citation,
+            entry.refId ?? "",
           ),
         );
       }
@@ -195,6 +199,7 @@ export function searchInIndex(index: IndexedEntry[], criteria: SearchCriteria): 
     "source",
     "note",
     "citation",
+    "refId",
   ];
 
   // 每個詞各自展開繁簡變體；只有標點的詞不參與比對。

@@ -30,6 +30,7 @@ const {
   clampGramSize,
   clampMinOrderConsistency,
   alignTexts,
+  clearSimilarityCaches,
 } = loadSimilarity();
 
 test("比對時忽略標點，並把繁簡、舊字形歸一", () => {
@@ -333,4 +334,111 @@ test("分段門檻與繁簡歸一可調", () => {
   );
   assert.equal(index.strict, true);
   assert.ok((index.findSimilar("t")[0]?.sharedChars ?? 0) < 16);
+});
+
+test("段首段尾短於片段長度的相同字：比相隔的差異長才算入段落", () => {
+  // 「處死五條」與「處死凡五條」：「五條」只隔一個衍字，屬於同一段。
+  const [block] = alignTexts(`${FILLER_A}大逆凌遲處死五條${FILLER_B}`, "大逆凌遲處死凡五條", { minBlockChars: 8 });
+  assert.equal(block.matches, 8);
+  assert.equal(block.aEnd - block.aStart, 8);
+  assert.equal(block.bEnd - block.bStart, 9);
+  // 隔著三個異文才碰上的一個「條」，多半是巧合，不算入。
+  const [loose] = alignTexts("大逆凌遲處死甲乙丙條", "大逆凌遲處死凡五條", { minBlockChars: 4 });
+  assert.equal(loose.matches, 6);
+  assert.equal(loose.aEnd, 6);
+});
+
+const LEFT_EDICT = "署刑部朱之臣再擬六等，請命絞罪以上提問，流罪以下撫按究報。計大逆凌遲處死五條，絞六條，流二條，徒二條。";
+const RIGHT_EDICT =
+  "三法司奏定從逆六等條例。大逆凌遲處死凡五條：凡從賊攻陷京師及為賊毀宗社、易門榜者，凡倡率勸進及為賊草偽詔者。" +
+  "上曰：所奏既已會議允當，並先奪職。其絞罪以上，三法司行撫按官逮至京訊之；流罪以下，撫按官依律即訊具奏。";
+
+// 標爲相同的字（比較時已按繁簡歸一，期望值也要歸一）。
+function sameText(comparable, marks, outside) {
+  return comparable.tokens.filter((_, index) => !marks[index] && !(outside && outside[index])).join("");
+}
+const fold = (text) => toComparableText(text).tokens.join("");
+
+test("比全文：次序顛倒的兩處都標爲相同，且包含只比段落時所見", () => {
+  const aligned = compareTexts(LEFT_EDICT, RIGHT_EDICT, false, {});
+  // 「大逆凌遲處死凡五條」只有 8 字相同，未達每段 10 字，不成對齊段落。
+  assert.equal(aligned.blocks.length, 1);
+  assert.equal(sameText(aligned.left, aligned.leftMarks, aligned.leftOutside), fold("絞罪以上流罪以下撫按"));
+
+  // 舊的做法整條按先後比較，兩處次序顛倒，只能對上其中一處。
+  const sequential = compareTexts(LEFT_EDICT, RIGHT_EDICT);
+  assert.equal(sameText(sequential.left, sequential.leftMarks).includes(fold("流罪以下撫按")), false);
+
+  const whole = compareTexts(LEFT_EDICT, RIGHT_EDICT, false, {}, true);
+  assert.equal(whole.blocks.length, 1);
+  assert.equal(whole.leftOutside, null);
+  const leftSame = sameText(whole.left, whole.leftMarks, null);
+  assert.ok(leftSame.includes(fold("絞罪以上流罪以下撫按")));
+  assert.ok(leftSame.includes(fold("大逆凌遲處死五條")));
+  whole.left.tokens.forEach((_, index) => {
+    if (!aligned.leftMarks[index] && !aligned.leftOutside[index]) {
+      assert.equal(whole.leftMarks[index], 0);
+    }
+  });
+  // 數字與標記一致：相同字數等於兩側未標爲不同的字數。
+  const unmarked = (marks) => marks.length - marks.reduce((sum, value) => sum + value, 0);
+  assert.equal(whole.equalChars, unmarked(whole.leftMarks));
+  assert.equal(whole.equalChars, unmarked(whole.rightMarks));
+});
+
+test("比全文：段落外的異文不跨過對齊段落", () => {
+  const first = "君父之仇不共戴天闖賊手毒君親";
+  const second = "中國臣民不聞加遺一矢收繫妻子";
+  const left = `${first}${FILLER_A}${second}`;
+  const right = `${second}${FILLER_B}${first}`;
+  const whole = compareTexts(left, right, false, {}, true);
+  assert.equal(whole.blocks.length, 2);
+  for (const block of whole.blocks) {
+    for (let index = block.aStart; index < block.aEnd; index += 1) {
+      assert.equal(whole.leftMarks[index], 0);
+    }
+    for (let index = block.bStart; index < block.bEnd; index += 1) {
+      assert.equal(whole.rightMarks[index], 0);
+    }
+  }
+  for (const hunk of whole.hunks) {
+    for (const block of whole.blocks) {
+      const crossesA = hunk.aStart < block.aEnd && block.aStart < hunk.aEnd;
+      const crossesB = hunk.bStart < block.bEnd && block.bStart < hunk.bEnd;
+      assert.equal(crossesA, false);
+      assert.equal(crossesB, false);
+    }
+  }
+});
+
+// 跨索引沿用的對齊結果：改動一條後，結果須與清空快取重算的完全一致。
+test("相似索引：改動一條後沿用其餘配對，結果與從頭計算相同", () => {
+  const base = [
+    { id: "a", text: "署刑部朱之臣再擬六等，請命絞罪以上提問，流罪以下撫按究報。計大逆凌遲處死五條，絞六條。" },
+    { id: "b", text: "三法司奏定從逆六等條例。大逆凌遲處死凡五條。其絞罪以上，三法司行撫按官逮至京訊之；流罪以下，撫按官依律即訊具奏。" },
+    { id: "c", text: "工科左李維樾言：從逆一案，經侍郎臣朱之臣擬議，嚴且盡矣，然逆之一字，未可概施。" },
+    { id: "d", text: "李維樾言從逆一案經侍郎朱之臣擬議嚴且盡矣然逆之一字未可概施導賊略地攻城是逆。" },
+  ];
+  const options = { gramSize: 4, minBlockChars: 6, minSharedChars: 6 };
+  const plain = (pairs) => JSON.stringify(pairs);
+
+  clearSimilarityCaches();
+  const first = new SimilarityIndex(base, options).findAllPairs();
+  assert.ok(first.length >= 2);
+
+  const edited = base.map((doc) => (doc.id === "c" ? { ...doc, text: doc.text.replace("嚴且盡矣", "已嚴矣") } : doc));
+  const cached = new SimilarityIndex(edited, options).findAllPairs();
+  clearSimilarityCaches();
+  const fresh = new SimilarityIndex(edited, options).findAllPairs();
+  assert.equal(plain(cached), plain(fresh));
+
+  // 規則改變時不沿用舊結果。
+  const stricter = { ...options, minBlockChars: 12 };
+  const afterRules = new SimilarityIndex(edited, stricter).findAllPairs();
+  clearSimilarityCaches();
+  assert.equal(plain(afterRules), plain(new SimilarityIndex(edited, stricter).findAllPairs()));
+
+  // 刪去的條目不再出現在結果中。
+  const removed = new SimilarityIndex(edited.filter((doc) => doc.id !== "d"), options).findAllPairs();
+  assert.ok(removed.every((pair) => pair.aId !== "d" && pair.bId !== "d"));
 });

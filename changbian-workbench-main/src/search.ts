@@ -1,24 +1,23 @@
-import * as OpenCC from "opencc-js";
+import { Converter as cnToTwBuilder } from "opencc-js/cn2t";
+import { isIgnorableChar, toSimplified } from "./text-fold";
 
-let twToCnConverter: ((text: string) => string) | null = null;
-let cnToTwConverter: ((text: string) => string) | null = null;
+export { isIgnorableChar, toSimplified };
 
-try {
-  twToCnConverter = OpenCC.Converter({ from: "tw", to: "cn" });
-  cnToTwConverter = OpenCC.Converter({ from: "cn", to: "tw" });
-} catch {
-  twToCnConverter = null;
-  cnToTwConverter = null;
+// 「簡轉繁」只有瀏覽器版的檢索用得到（桌面版由主程序的 SQLite 索引處理），第一次用到時才建立。
+let cnToTwConverter: ((text: string) => string) | null | undefined;
+
+function toTraditional(text: string): string | null {
+  if (cnToTwConverter === undefined) {
+    try {
+      cnToTwConverter = cnToTwBuilder({ from: "cn", to: "tw" });
+    } catch {
+      cnToTwConverter = null;
+    }
+  }
+  return cnToTwConverter ? cnToTwConverter(text) : null;
 }
 
-// 檢索、標黃與比勘時忽略標點、符號與空白，句讀有無不影響比對。
-// □ ■ 是缺字符號，代表一個字，保留。
-const IGNORABLE_CHAR = /(?![□■])[\p{P}\p{S}\p{Z}\p{Cc}\p{Cf}]/u;
 const IGNORABLE_CHARS = /(?![□■])[\p{P}\p{S}\p{Z}\p{Cc}\p{Cf}]/gu;
-
-export function isIgnorableChar(char: string): boolean {
-  return IGNORABLE_CHAR.test(char);
-}
 
 // 查詢以空白分隔為多個詞，每個詞都須命中；詞內的標點不計。
 export function splitQueryTerms(query: string): string[] {
@@ -29,10 +28,6 @@ function clean(text: string): string {
   return text.toLocaleLowerCase().replace(IGNORABLE_CHARS, "");
 }
 
-export function toSimplified(text: string): string {
-  return twToCnConverter ? twToCnConverter(text) : text;
-}
-
 export function buildVariants(text: string): string[] {
   const base = clean(text);
   if (!base) {
@@ -40,13 +35,10 @@ export function buildVariants(text: string): string[] {
   }
 
   const set = new Set<string>([base]);
-
-  if (twToCnConverter) {
-    set.add(clean(twToCnConverter(text)));
-  }
-
-  if (cnToTwConverter) {
-    set.add(clean(cnToTwConverter(text)));
+  set.add(clean(toSimplified(text)));
+  const traditional = toTraditional(text);
+  if (traditional !== null) {
+    set.add(clean(traditional));
   }
 
   return [...set].filter(Boolean);

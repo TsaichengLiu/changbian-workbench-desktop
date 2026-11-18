@@ -1,18 +1,200 @@
+/* ── 配色 ─────────────────────────────
+   每套配色只定義下列變量（掛在 <html data-theme> 上，彈窗也取用同一套），元件一律取用變量。
+   縹緗為淺色，其餘五套為深色。 */
 :root {
-  --bg-0: #f5f0e5;
-  --bg-1: #ede5d6;
-  --bg-2: #e7ddcb;
-  --bg-glow-a: rgba(47, 111, 105, 0.2);
-  --bg-glow-b: rgba(188, 129, 91, 0.22);
-  --ambient-a: rgba(210, 165, 112, 0.32);
-  --ambient-b: rgba(47, 111, 105, 0.26);
-  --ink-0: #1f2527;
-  --ink-1: #405057;
-  --panel: rgba(248, 244, 234, 0.82);
-  --stroke: rgba(46, 64, 69, 0.2);
-  --accent: #2f6f69;
-  --danger: #8d3f36;
-  --shadow: 0 18px 42px rgba(46, 52, 55, 0.15);
+  color-scheme: light;
+  /* 縹緗：緗色（淺黃）紙面、暖墨文字、縹色（青碧偏藍）點綴，朱色示警。 */
+  /* 頁面底色與光暈 */
+  --bg-0: #f3ecdb;
+  --bg-1: #ede4cf;
+  --bg-2: #e6dbc2;
+  --bg-glow-a: rgba(58, 118, 128, 0.16);
+  --bg-glow-b: rgba(201, 146, 82, 0.2);
+  --ambient-a: rgba(219, 168, 98, 0.34);
+  --ambient-b: rgba(58, 118, 128, 0.24);
+  /* 文字：正文、次要、註記；--ink-line 是線條與淺色填充的基色 */
+  --ink-0: #241f19;
+  --ink-1: #51483d;
+  --ink-2: #776d5d;
+  --ink-line: #3d3426;
+  /* 面：欄、卡片、淡卡片、輸入框、浮起的按鈕面、按鈕、選單、彈窗 */
+  --panel: rgba(252, 248, 238, 0.84);
+  --card: rgba(255, 253, 246, 0.94);
+  --card-soft: rgba(255, 252, 243, 0.5);
+  --field: #fffdf7;
+  --raised: #ffffff;
+  --button: rgba(255, 253, 246, 0.8);
+  --menu: #fffdf7;
+  --modal: #faf5e9;
+  /* 卡片樣式用：毛玻璃、金屬 */
+  --glass: rgba(255, 255, 255, 0.36);
+  --glass-soft: rgba(255, 255, 255, 0.2);
+  --glass-panel: rgba(255, 252, 244, 0.4);
+  --gloss-hi: rgba(255, 255, 255, 0.8);
+  --gloss-lo: rgba(255, 255, 255, 0.3);
+  --metal-a: #fcfcfb;
+  --metal-b: #e4e3df;
+  --metal-edge: #ffffff;
+  --metal-shade: rgba(40, 36, 30, 0.16);
+  --metal-grain: rgba(255, 255, 255, 0.4);
+  /* 線條 */
+  --stroke: color-mix(in srgb, var(--ink-line) 16%, transparent);
+  --line: color-mix(in srgb, var(--ink-line) 14%, transparent);
+  /* 強調色：本色、文字用、淡底、其上文字；示警；檢索標黃 */
+  --accent: #2b6874;
+  --accent-ink: #1f515b;
+  --accent-wash: #e1ebe8;
+  --on-accent: #f5fafa;
+  --danger: #a3412d;
+  --highlight: rgba(255, 214, 92, 0.85);
+  /* 陰影：欄、卡片、懸停卡片 */
+  --shadow: 0 1px 2px rgba(70, 52, 24, 0.05), 0 14px 34px rgba(70, 52, 24, 0.1);
+  --card-shadow: 0 1px 2px rgba(70, 52, 24, 0.06), 0 3px 10px rgba(70, 52, 24, 0.05);
+  --card-shadow-hover: 0 2px 4px rgba(70, 52, 24, 0.07), 0 10px 24px rgba(70, 52, 24, 0.09);
+}
+
+/* 五套深色配色共用的取值；各套再定義底色、文字與強調色。 */
+:root[data-theme]:not([data-theme="changbian"]) {
+  color-scheme: dark;
+  --card-soft: rgba(255, 255, 255, 0.035);
+  --field: rgba(0, 0, 0, 0.26);
+  --raised: rgba(255, 255, 255, 0.14);
+  --button: rgba(255, 255, 255, 0.07);
+  --glass: rgba(255, 255, 255, 0.07);
+  --glass-soft: rgba(255, 255, 255, 0.04);
+  --gloss-hi: rgba(255, 255, 255, 0.24);
+  --gloss-lo: rgba(255, 255, 255, 0.06);
+  --metal-a: rgba(255, 255, 255, 0.12);
+  --metal-b: rgba(255, 255, 255, 0.025);
+  --metal-edge: rgba(255, 255, 255, 0.2);
+  --metal-shade: rgba(0, 0, 0, 0.45);
+  --metal-grain: rgba(255, 255, 255, 0.03);
+  --stroke: rgba(255, 255, 255, 0.12);
+  --line: rgba(255, 255, 255, 0.1);
+  --danger: #f08b78;
+  --shadow: 0 18px 44px rgba(0, 0, 0, 0.38);
+  --card-shadow: 0 1px 2px rgba(0, 0, 0, 0.22);
+  --card-shadow-hover: 0 8px 22px rgba(0, 0, 0, 0.32);
+}
+
+/* 黑曜石：近黑的火山玻璃，帶一層淡紫的虹光。 */
+:root[data-theme="obsidian"] {
+  --bg-0: #0c0c10;
+  --bg-1: #121118;
+  --bg-2: #19171f;
+  --bg-glow-a: rgba(150, 128, 230, 0.16);
+  --bg-glow-b: rgba(96, 150, 190, 0.1);
+  --ambient-a: rgba(150, 128, 230, 0.3);
+  --ambient-b: rgba(80, 140, 170, 0.18);
+  --ink-0: #ecebf2;
+  --ink-1: #b7b4c4;
+  --ink-2: #8f8c9e;
+  --ink-line: #ecebf2;
+  --panel: rgba(24, 23, 31, 0.74);
+  --card: rgba(255, 255, 255, 0.045);
+  --menu: #1a1920;
+  --modal: #1b1a22;
+  --glass-panel: rgba(30, 28, 40, 0.46);
+  --accent: #b3a6f2;
+  --accent-ink: #c9bfff;
+  --accent-wash: rgba(179, 166, 242, 0.15);
+  --on-accent: #17132a;
+}
+
+/* 海藍：深海的藍，透出淺水的青光。 */
+:root[data-theme="ocean"] {
+  --bg-0: #061a2c;
+  --bg-1: #08243c;
+  --bg-2: #0b2f4b;
+  --bg-glow-a: rgba(64, 196, 230, 0.2);
+  --bg-glow-b: rgba(40, 200, 170, 0.12);
+  --ambient-a: rgba(64, 196, 230, 0.3);
+  --ambient-b: rgba(40, 200, 170, 0.2);
+  --ink-0: #e7f3fb;
+  --ink-1: #a9c3d6;
+  --ink-2: #829fb5;
+  --ink-line: #e7f3fb;
+  --panel: rgba(8, 34, 56, 0.68);
+  --card: rgba(140, 200, 240, 0.06);
+  --menu: #0b2338;
+  --modal: #0d2740;
+  --glass-panel: rgba(12, 44, 72, 0.42);
+  --accent: #52c6e6;
+  --accent-ink: #84d9f0;
+  --accent-wash: rgba(82, 198, 230, 0.15);
+  --on-accent: #03202c;
+}
+
+/* 石墨：鉛筆芯的灰，帶一點銀藍的金屬光。 */
+:root[data-theme="graphite"] {
+  --bg-0: #1d1e21;
+  --bg-1: #232428;
+  --bg-2: #2a2c31;
+  --bg-glow-a: rgba(170, 190, 220, 0.1);
+  --bg-glow-b: rgba(255, 255, 255, 0.05);
+  --ambient-a: rgba(170, 190, 220, 0.2);
+  --ambient-b: rgba(255, 255, 255, 0.08);
+  --ink-0: #eeeef0;
+  --ink-1: #b6b8bf;
+  --ink-2: #92949c;
+  --ink-line: #eeeef0;
+  --panel: rgba(42, 43, 48, 0.76);
+  --card: rgba(255, 255, 255, 0.05);
+  --menu: #2a2b30;
+  --modal: #2c2d32;
+  --glass-panel: rgba(50, 52, 58, 0.46);
+  --accent: #93b4dc;
+  --accent-ink: #aecaee;
+  --accent-wash: rgba(147, 180, 220, 0.15);
+  --on-accent: #111823;
+}
+
+/* 黃昏：天邊殘霞的琥珀，漸入暮紫與靛青。 */
+:root[data-theme="dusk"] {
+  --bg-0: #2b1b2c;
+  --bg-1: #211932;
+  --bg-2: #151629;
+  --bg-glow-a: rgba(255, 166, 92, 0.22);
+  --bg-glow-b: rgba(232, 112, 140, 0.14);
+  --ambient-a: rgba(255, 166, 92, 0.3);
+  --ambient-b: rgba(232, 112, 140, 0.2);
+  --ink-0: #f7ede6;
+  --ink-1: #d3c0b9;
+  --ink-2: #ab9791;
+  --ink-line: #f7ede6;
+  --panel: rgba(40, 26, 44, 0.66);
+  --card: rgba(255, 210, 180, 0.06);
+  --menu: #2a1d2f;
+  --modal: #2c1f33;
+  --glass-panel: rgba(52, 34, 56, 0.42);
+  --accent: #f4a764;
+  --accent-ink: #f8bd88;
+  --accent-wash: rgba(244, 167, 100, 0.15);
+  --on-accent: #2a1507;
+}
+
+/* 蒸汽波：深紫夜色上的霓虹粉與電光青。 */
+:root[data-theme="vaporwave"] {
+  --bg-0: #1c0d33;
+  --bg-1: #2a0f47;
+  --bg-2: #1a1446;
+  --bg-glow-a: rgba(255, 113, 206, 0.22);
+  --bg-glow-b: rgba(1, 205, 254, 0.16);
+  --ambient-a: rgba(255, 113, 206, 0.32);
+  --ambient-b: rgba(1, 205, 254, 0.22);
+  --ink-0: #fbeeff;
+  --ink-1: #dbbde9;
+  --ink-2: #b197c7;
+  --ink-line: #fbeeff;
+  --panel: rgba(38, 14, 64, 0.64);
+  --card: rgba(255, 140, 220, 0.06);
+  --menu: #26103f;
+  --modal: #2a1245;
+  --glass-panel: rgba(48, 18, 80, 0.42);
+  --accent: #ff7ad2;
+  --accent-ink: #ff9fdf;
+  --accent-wash: rgba(255, 122, 210, 0.15);
+  --on-accent: #2b0620;
 }
 
 * {
@@ -70,7 +252,7 @@ select {
   border-radius: 999px;
   filter: blur(40px);
   pointer-events: none;
-  opacity: 0.5;
+  opacity: 0.4;
 }
 
 .ambient-a {
@@ -97,10 +279,9 @@ select {
   gap: 14px;
   height: calc(100vh - 32px);
   border: 1px solid var(--stroke);
-  border-radius: 18px;
+  border-radius: 16px;
   background: var(--panel);
   box-shadow: var(--shadow);
-  backdrop-filter: blur(8px);
   overflow: hidden;
   animation: panel-fade 0.6s ease both;
 }
@@ -234,8 +415,9 @@ h3 {
 .icon-btn,
 .scope {
   border: 1px solid transparent;
-  border-radius: 12px;
-  transition: all 0.2s ease;
+  border-radius: 10px;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease,
+    filter 0.15s ease;
   cursor: pointer;
 }
 
@@ -248,26 +430,32 @@ select:focus-visible,
 
 .primary-btn {
   padding: 10px 14px;
-  background: linear-gradient(130deg, #255f5a, #3f8780);
-  color: #f8faf7;
+  border-color: color-mix(in srgb, var(--accent) 80%, var(--ink-0));
+  background: var(--accent);
+  color: var(--on-accent);
   font-weight: 600;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.14), 0 1px 2px rgb(0 0 0 / 0.12);
 }
 
 .primary-btn:hover {
-  transform: translateY(-1px);
-  filter: brightness(1.06);
+  filter: brightness(1.08);
+}
+
+.primary-btn:active {
+  filter: brightness(0.96);
 }
 
 .secondary-btn {
   padding: 10px 12px;
-  background: #ecf5f3;
-  border-color: rgba(47, 111, 105, 0.35);
-  color: #24534e;
+  background: var(--accent-wash);
+  border-color: color-mix(in srgb, var(--accent) 26%, transparent);
+  color: var(--accent-ink);
   font-weight: 600;
 }
 
 .secondary-btn:hover {
-  background: #dff0ed;
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 16%, var(--field));
 }
 
 .secondary-btn:disabled {
@@ -277,14 +465,15 @@ select:focus-visible,
 
 .ghost-btn {
   padding: 9px 12px;
-  border-color: var(--stroke);
-  background: rgba(255, 255, 255, 0.55);
+  border-color: var(--line);
+  background: var(--card-soft);
   color: var(--ink-1);
 }
 
-.ghost-btn:hover {
-  border-color: rgba(47, 111, 105, 0.45);
-  color: #24534e;
+.ghost-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 38%, transparent);
+  background: var(--accent-wash);
+  color: var(--accent-ink);
 }
 
 .ghost-btn:disabled {
@@ -293,35 +482,39 @@ select:focus-visible,
 }
 
 .danger-btn {
-  border-color: rgba(141, 63, 54, 0.36);
+  border-color: color-mix(in srgb, var(--danger) 36%, transparent);
   color: var(--danger);
 }
 
-.danger-btn:hover {
-  background: #f7ece9;
+.danger-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 50%, transparent);
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 9%, var(--field));
 }
 
 .icon-btn {
   min-width: 34px;
-  height: 30px;
+  height: 28px;
   padding: 0 10px;
-  background: rgba(255, 255, 255, 0.75);
-  border-color: rgba(47, 111, 105, 0.2);
-  color: #31575e;
+  background: transparent;
+  border-color: var(--line);
+  color: var(--ink-1);
   font-size: 12px;
 }
 
 .icon-btn:hover {
-  background: #eef8f7;
+  border-color: color-mix(in srgb, var(--accent) 38%, transparent);
+  background: var(--accent-wash);
+  color: var(--accent-ink);
 }
 
 .icon-btn.danger {
-  border-color: rgba(141, 63, 54, 0.35);
+  border-color: color-mix(in srgb, var(--danger) 35%, transparent);
   color: var(--danger);
 }
 
 .icon-btn.danger:hover {
-  background: #f7ece9;
+  background: color-mix(in srgb, var(--danger) 9%, var(--field));
 }
 
 .sidebar-scroll {
@@ -368,9 +561,9 @@ select:focus-visible,
   max-height: min(620px, calc(100vh - 150px));
   overflow: auto;
   padding: 8px;
-  border: 1px solid rgba(46, 64, 69, 0.22);
+  border: 1px solid color-mix(in srgb, var(--ink-line) 22%, transparent);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.98);
+  background: var(--menu);
   box-shadow: 0 18px 38px rgba(30, 35, 38, 0.22);
 }
 
@@ -394,7 +587,7 @@ select:focus-visible,
 }
 
 .workspace-menu-item:hover {
-  background: rgba(47, 111, 105, 0.11);
+  background: color-mix(in srgb, var(--accent) 11%, transparent);
 }
 
 .workspace-menu-item:disabled {
@@ -421,7 +614,7 @@ select:focus-visible,
   height: 20px;
   padding: 0 7px;
   border-radius: 999px;
-  background: rgba(47, 111, 105, 0.12);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
   color: var(--ink-1);
   font-size: 11px;
   font-weight: 700;
@@ -430,7 +623,7 @@ select:focus-visible,
 .workspace-menu-divider {
   height: 1px;
   margin: 7px 4px;
-  background: rgba(46, 64, 69, 0.13);
+  background: color-mix(in srgb, var(--ink-line) 13%, transparent);
 }
 
 .compact-scope-switch {
@@ -455,18 +648,17 @@ select:focus-visible,
 }
 
 .project-block {
-  border: 1px solid rgba(47, 111, 105, 0.14);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.52);
-  padding: 8px;
+  border: 1px solid var(--card-edge);
+  border-radius: 12px;
+  background: var(--group-bg);
+  padding: 6px;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 4px;
 }
 
 .project-block.active {
-  border-color: rgba(47, 111, 105, 0.14);
-  background: rgba(255, 255, 255, 0.52);
+  border-color: color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
 .project-row,
@@ -491,7 +683,7 @@ select:focus-visible,
 }
 
 .tree-toggle:hover {
-  background: rgba(47, 111, 105, 0.1);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
   color: var(--accent);
 }
 
@@ -511,9 +703,9 @@ select:focus-visible,
   flex: 1;
   min-width: 0;
   border: 0;
-  border-radius: 10px;
+  border-radius: 8px;
   background: transparent;
-  padding: 8px;
+  padding: 7px 8px;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -524,12 +716,32 @@ select:focus-visible,
 
 .project-main:hover,
 .chapter-main:hover {
-  background: rgba(47, 111, 105, 0.08);
+  background: color-mix(in srgb, var(--ink-line) 6%, transparent);
 }
 
-.project-block.active .project-main,
+.project-block.active .project-main {
+  color: var(--accent-ink);
+}
+
 .chapter-row.active .chapter-main {
-  background: rgba(47, 111, 105, 0.08);
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-ink);
+  font-weight: 600;
+}
+
+.chapter-row.active .chapter-main .badge {
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent-ink);
+}
+
+/* 「+ 新增章節」：虛線淡鈕，不與章節列搶眼。 */
+.chapter-stack > .ghost-btn {
+  margin-top: 2px;
+  padding: 6px 10px;
+  border-style: dashed;
+  background: transparent;
+  color: var(--ink-2);
+  font-size: 13px;
 }
 
 .project-title {
@@ -553,7 +765,7 @@ select:focus-visible,
 
 .drag-handle {
   user-select: none;
-  color: rgba(64, 80, 87, 0.7);
+  color: color-mix(in srgb, var(--ink-1) 70%, transparent);
   font-size: 12px;
   width: 24px;
   height: 24px;
@@ -565,13 +777,13 @@ select:focus-visible,
 }
 
 .drag-handle:hover {
-  background: rgba(47, 111, 105, 0.12);
-  color: #285d58;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-ink);
 }
 
 .drag-handle.dragging {
   cursor: grabbing;
-  background: rgba(47, 111, 105, 0.2);
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
 }
 
 .drag-handle-placeholder {
@@ -583,13 +795,14 @@ select:focus-visible,
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 24px;
-  height: 24px;
-  padding: 0 8px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 7px;
   border-radius: 999px;
-  background: rgba(47, 111, 105, 0.12);
-  color: #285f59;
-  font-size: 12px;
+  background: color-mix(in srgb, var(--ink-line) 8%, transparent);
+  color: var(--ink-1);
+  font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
 }
 
 .row-actions {
@@ -616,7 +829,7 @@ select:focus-visible,
   gap: 2px;
   margin-left: 54px;
   padding-left: 7px;
-  border-left: 1px solid rgba(47, 111, 105, 0.18);
+  border-left: 1px solid color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 .tree-entry {
@@ -648,7 +861,7 @@ select:focus-visible,
 
 .tree-entry:hover,
 .tree-entry.active {
-  background: rgba(47, 111, 105, 0.09);
+  background: color-mix(in srgb, var(--accent) 9%, transparent);
   color: var(--ink-0);
 }
 
@@ -662,18 +875,11 @@ select:focus-visible,
 }
 
 .chapter-row {
-  border: 1px solid rgba(46, 64, 69, 0.08);
-  border-radius: 10px;
-  background: rgba(253, 251, 246, 0.75);
-  padding: 2px;
-}
-
-.chapter-row.active {
-  border-color: rgba(46, 64, 69, 0.08);
+  border-radius: 8px;
 }
 
 .drop-target {
-  outline: 2px solid rgba(47, 111, 105, 0.42);
+  outline: 2px solid color-mix(in srgb, var(--accent) 42%, transparent);
   outline-offset: 0;
 }
 
@@ -682,8 +888,8 @@ select:focus-visible,
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid rgba(46, 64, 69, 0.15);
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--line);
 }
 
 .head-actions {
@@ -705,29 +911,50 @@ select:focus-visible,
 }
 
 .entry-card {
-  border: 1px solid rgba(46, 64, 69, 0.14);
-  border-radius: 14px;
-  padding: 12px;
-  background: rgba(255, 255, 255, 0.72);
+  position: relative;
+  flex: 0 0 auto;
+  border: 1px solid var(--card-edge);
+  border-radius: 12px;
+  padding: 14px 16px 12px;
+  background: var(--card-bg);
+  box-shadow: var(--card-elev);
   cursor: default;
   display: flex;
   flex-direction: column;
   gap: 8px;
-  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .entry-card:hover {
-  transform: translateY(-1px);
-  border-color: rgba(47, 111, 105, 0.42);
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+  box-shadow: var(--card-elev-hover);
 }
 
+/* 選中的卡片：整張鋪一層淡淡的強調色底，標題用強調色；邊框也帶一點強調色。 */
 .entry-card.selected {
-  transform: translateY(-1px);
-  border-color: rgba(47, 111, 105, 0.42);
+  border-color: color-mix(in srgb, var(--accent) 28%, transparent);
+  background: linear-gradient(
+      color-mix(in srgb, var(--accent) 9%, transparent),
+      color-mix(in srgb, var(--accent) 9%, transparent)
+    ),
+    var(--card-bg);
+  box-shadow: var(--card-elev);
+}
+
+/* 卡片上的「複製／檢視／編輯」平時淡一些，指向或選中時才完全顯示。 */
+.entry-card .entry-actions {
+  opacity: 0.6;
+  transition: opacity 0.15s ease;
+}
+
+.entry-card:hover .entry-actions,
+.entry-card:focus-within .entry-actions,
+.entry-card.selected .entry-actions {
+  opacity: 1;
 }
 
 .entry-card.selected .entry-heading {
-  color: inherit;
+  color: var(--accent-ink);
 }
 
 .entry-top {
@@ -785,9 +1012,9 @@ select:focus-visible,
 
 .entry-citation {
   margin: 0;
-  color: #51696f;
+  color: var(--ink-2);
   font-size: 13px;
-  border-top: 1px solid rgba(46, 64, 69, 0.08);
+  border-top: 1px solid color-mix(in srgb, var(--ink-line) 9%, transparent);
   padding-top: 8px;
 }
 
@@ -801,20 +1028,19 @@ select:focus-visible,
   display: inline-flex;
   align-items: center;
   height: 24px;
-  border: 1px solid rgba(47, 111, 105, 0.32);
+  border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
   border-radius: 999px;
-  background: rgba(224, 246, 241, 0.88);
-  color: #1f5b54;
+  background: var(--accent-wash);
+  color: var(--accent-ink);
   padding: 0 10px;
   font-size: 12px;
 }
 
 .search-panel,
 .export-panel {
-  border: 1px solid rgba(46, 64, 69, 0.14);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.7);
-  padding: 12px;
+  border: 0;
+  background: transparent;
+  padding: 2px 0 0;
 }
 
 .search-panel {
@@ -841,9 +1067,9 @@ select:focus-visible,
 .modal-label select,
 .modal-label textarea {
   width: 100%;
-  border: 1px solid rgba(46, 64, 69, 0.2);
+  border: 1px solid color-mix(in srgb, var(--ink-line) 20%, transparent);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.88);
+  background: var(--field);
   color: var(--ink-0);
   padding: 10px;
 }
@@ -852,8 +1078,8 @@ select:focus-visible,
 .modal-label input:focus,
 .modal-label textarea:focus {
   outline: none;
-  border-color: rgba(47, 111, 105, 0.65);
-  box-shadow: 0 0 0 3px rgba(47, 111, 105, 0.18);
+  border-color: color-mix(in srgb, var(--accent) 65%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 18%, transparent);
 }
 
 .search-results {
@@ -884,7 +1110,7 @@ select:focus-visible,
 .entry-list[data-scrolling="true"],
 .search-results[data-scrolling="true"],
 .advanced-results[data-scrolling="true"] {
-  scrollbar-color: rgba(46, 64, 69, 0.42) transparent;
+  scrollbar-color: color-mix(in srgb, var(--ink-line) 42%, transparent) transparent;
 }
 
 .left-pane::-webkit-scrollbar,
@@ -926,21 +1152,22 @@ select:focus-visible,
 .entry-list[data-scrolling="true"]::-webkit-scrollbar-thumb,
 .search-results[data-scrolling="true"]::-webkit-scrollbar-thumb,
 .advanced-results[data-scrolling="true"]::-webkit-scrollbar-thumb {
-  background: rgba(46, 64, 69, 0.38);
+  background: color-mix(in srgb, var(--ink-line) 38%, transparent);
 }
 
 .result-meta {
   margin: 0;
-  color: #586c72;
+  color: var(--ink-2);
   font-size: 13px;
 }
 
 .search-item {
-  border: 1px solid rgba(46, 64, 69, 0.14);
-  border-radius: 12px;
-  padding: 10px;
+  position: relative;
+  border: 1px solid var(--card-edge);
+  border-radius: 10px;
+  padding: 10px 12px;
   text-align: left;
-  background: rgba(255, 255, 255, 0.78);
+  background: var(--card-bg);
   cursor: pointer;
   display: flex;
   flex-direction: column;
@@ -948,17 +1175,17 @@ select:focus-visible,
 }
 
 .search-item:hover {
-  border-color: rgba(47, 111, 105, 0.5);
-  background: #f2fbf9;
+  border-color: color-mix(in srgb, var(--accent) 36%, transparent);
+  box-shadow: var(--card-elev-hover);
 }
 
 .search-item.selected {
-  border-color: rgba(47, 111, 105, 0.52);
-  background: rgba(228, 247, 243, 0.95);
+  border-color: color-mix(in srgb, var(--accent) 52%, transparent);
+  background: var(--accent-wash);
 }
 
 .search-path {
-  color: #2d5f59;
+  color: var(--accent-ink);
   font-size: 12px;
 }
 
@@ -969,7 +1196,7 @@ select:focus-visible,
 
 .search-snippet,
 .search-citation {
-  color: #4c6368;
+  color: var(--ink-2);
   font-size: 13px;
 }
 
@@ -981,7 +1208,7 @@ select:focus-visible,
 }
 
 .match-highlight {
-  background: rgba(255, 234, 122, 0.95);
+  background: var(--highlight);
   color: #2a2a24;
   border-radius: 4px;
   padding: 0 2px;
@@ -990,10 +1217,10 @@ select:focus-visible,
 .empty-state,
 .empty-inline {
   margin: 0;
-  border: 1px dashed rgba(46, 64, 69, 0.25);
-  border-radius: 14px;
-  background: rgba(255, 255, 255, 0.52);
-  color: #4a6167;
+  border: 1px dashed color-mix(in srgb, var(--ink-line) 22%, transparent);
+  border-radius: 12px;
+  background: var(--card-soft);
+  color: var(--ink-2);
   padding: 16px;
 }
 
@@ -1018,15 +1245,15 @@ select:focus-visible,
 
 .scope {
   padding: 8px 10px;
-  border-color: rgba(46, 64, 69, 0.2);
-  background: rgba(255, 255, 255, 0.8);
-  color: #455f65;
+  border-color: color-mix(in srgb, var(--ink-line) 20%, transparent);
+  background: var(--field);
+  color: var(--ink-1);
 }
 
 .scope.active {
-  border-color: rgba(47, 111, 105, 0.6);
-  background: rgba(222, 245, 241, 0.95);
-  color: #205954;
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  background: var(--accent-wash);
+  color: var(--accent-ink);
   font-weight: 600;
 }
 
@@ -1040,9 +1267,9 @@ select:focus-visible,
   position: fixed;
   z-index: 150;
   width: 180px;
-  border: 1px solid rgba(46, 64, 69, 0.22);
+  border: 1px solid color-mix(in srgb, var(--ink-line) 22%, transparent);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.97);
+  background: var(--menu);
   box-shadow: 0 12px 28px rgba(30, 35, 38, 0.2);
   overflow: hidden;
 }
@@ -1054,15 +1281,15 @@ select:focus-visible,
   padding: 10px;
   text-align: left;
   cursor: pointer;
-  color: #2f4f56;
+  color: var(--ink-1);
 }
 
 .context-item:hover {
-  background: rgba(47, 111, 105, 0.13);
+  background: color-mix(in srgb, var(--accent) 13%, transparent);
 }
 
 .context-item.context-danger {
-  color: #9b4b42;
+  color: var(--danger);
 }
 
 .context-item.context-danger:hover {
@@ -1091,7 +1318,7 @@ select:focus-visible,
   border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--stroke));
   border-radius: 12px;
   padding: 10px 14px;
-  background: color-mix(in srgb, var(--panel) 92%, white);
+  background: color-mix(in srgb, var(--modal) 96%, var(--danger));
   color: var(--ink-0);
   box-shadow: var(--shadow);
   font-size: 13px;
@@ -1151,10 +1378,10 @@ select:focus-visible,
   display: flex;
   align-items: center;
   gap: 14px;
-  border: 1px solid rgba(46, 64, 69, 0.14);
+  border: 1px solid color-mix(in srgb, var(--ink-line) 14%, transparent);
   border-radius: 12px;
   padding: 11px 12px;
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--card);
 }
 
 .trash-item-main {
@@ -1183,20 +1410,20 @@ select:focus-visible,
   flex: 0 0 auto;
   border-radius: 999px;
   padding: 3px 7px;
-  background: rgba(47, 111, 105, 0.12);
-  color: #285f59;
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent-ink);
   font-size: 11px;
   font-weight: 700;
 }
 
 .trash-kind-chapter {
   background: rgba(89, 105, 143, 0.12);
-  color: #485b86;
+  color: color-mix(in srgb, #485b86 72%, var(--ink-0));
 }
 
 .trash-kind-entry {
   background: rgba(181, 123, 66, 0.13);
-  color: #80562f;
+  color: color-mix(in srgb, #80562f 72%, var(--ink-0));
 }
 
 .trash-blocked-reason {
@@ -1222,20 +1449,38 @@ select:focus-visible,
 
 .modal-card {
   width: min(520px, calc(100vw - 24px));
-  border: 1px solid rgba(46, 64, 69, 0.24);
+  border: 1px solid color-mix(in srgb, var(--ink-line) 24%, transparent);
   border-radius: 16px;
-  background: #fdfbf5;
+  background: var(--modal);
   box-shadow: 0 20px 42px rgba(20, 24, 26, 0.28);
   padding: 16px;
   display: flex;
   flex-direction: column;
   gap: 12px;
   pointer-events: auto;
+  position: relative;
+}
+
+/* 所有窗口：右上角同一位置的關閉按鈕；標題列右側留出位置。 */
+.modal-card > .modal-close-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 3;
+}
+
+.modal-card > .modal-head {
+  padding-right: 40px;
 }
 
 .modal-card.modal-large {
   width: min(800px, calc(100vw - 24px));
   max-height: calc(100vh - 30px);
+}
+
+/* 檢視窗常要兩個並排對照：稍窄一些，1440 寬的屏幕可並排放下兩個。 */
+.modal-card.modal-large.entry-view-modal {
+  width: min(720px, calc(100vw - 24px));
 }
 
 .modal-card.modal-xl {
@@ -1306,7 +1551,7 @@ select:focus-visible,
   flex-direction: column;
   gap: 6px;
   font-size: 13px;
-  color: #3e5960;
+  color: var(--ink-1);
 }
 
 .entry-view-grid {
@@ -1329,9 +1574,10 @@ select:focus-visible,
 }
 
 .entry-view-time-meta {
-  font-size: 12px;
-  opacity: 0.9;
   margin: 0;
+  padding-left: 4px;
+  font-size: 11px;
+  opacity: 0.85;
 }
 
 .entry-view-footer {
@@ -1348,10 +1594,116 @@ select:focus-visible,
   margin-left: auto;
 }
 
+/* 檢視窗：右上角關閉；左下角編號（點擊複製鏈接）與時間。 */
+.modal-close-btn {
+  display: inline-grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  background: transparent;
+  color: var(--ink-1);
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.modal-close-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+}
+
+.modal-close-btn:hover:not(:disabled) {
+  border-color: var(--stroke);
+  background: color-mix(in srgb, var(--ink-line) 7%, transparent);
+  color: var(--ink-0);
+}
+
+.modal-close-btn:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.entry-view-meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 5px;
+  min-width: 0;
+}
+
+.entry-id-chip {
+  display: inline-flex;
+  align-items: stretch;
+  overflow: hidden;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+  border-radius: 999px;
+  background: var(--field);
+  box-shadow: 0 1px 2px rgba(20, 32, 34, 0.06);
+  font-family: inherit;
+  line-height: 1.6;
+  cursor: pointer;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.entry-id-chip-icon {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 2px 0 9px;
+  color: var(--accent);
+}
+
+.entry-id-chip-icon .entry-ref-icon {
+  width: 13px;
+  height: 13px;
+}
+
+.entry-id-chip-id {
+  padding: 3px 10px 3px 4px;
+  color: var(--ink-0);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.05em;
+}
+
+.entry-id-chip-action {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 11px;
+  border-left: 1px solid color-mix(in srgb, var(--accent) 20%, transparent);
+  background: color-mix(in srgb, var(--accent) 9%, var(--field));
+  color: var(--accent-ink);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.entry-id-chip:hover {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: 0 2px 8px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+
+.entry-id-chip:hover .entry-id-chip-action {
+  background: color-mix(in srgb, var(--accent) 17%, var(--field));
+}
+
+.entry-id-chip.is-copied .entry-id-chip-action {
+  background: var(--accent);
+  color: var(--on-accent);
+}
+
 .entry-view-block {
-  border: 1px solid rgba(46, 64, 69, 0.16);
+  border: 1px solid color-mix(in srgb, var(--ink-line) 16%, transparent);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.76);
+  background: var(--card);
   padding: 10px;
   display: flex;
   flex-direction: column;
@@ -1359,7 +1711,7 @@ select:focus-visible,
 }
 
 .entry-view-title {
-  color: #4f666c;
+  color: var(--ink-2);
   font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.04em;
@@ -1369,7 +1721,7 @@ select:focus-visible,
 .entry-view-source,
 .entry-view-note,
 .entry-view-citation {
-  color: #2f454b;
+  color: var(--ink-0);
   cursor: text;
   line-height: 1.62;
   -webkit-user-select: text;
@@ -1392,20 +1744,20 @@ select:focus-visible,
   min-width: 32px;
   width: 32px;
   padding: 0;
-  border-color: rgba(46, 64, 69, 0.2);
+  border-color: color-mix(in srgb, var(--ink-line) 20%, transparent);
   background: transparent;
   box-shadow: none;
   font-weight: 600;
 }
 
 .format-btn:hover {
-  background: rgba(47, 111, 105, 0.08);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
 .format-btn[aria-pressed="true"] {
   border-color: var(--accent);
   background: var(--accent);
-  color: white;
+  color: var(--on-accent);
 }
 
 .format-btn:nth-of-type(2) {
@@ -1413,7 +1765,7 @@ select:focus-visible,
 }
 
 .format-tip {
-  color: #5a6e74;
+  color: var(--ink-2);
   font-size: 12px;
   white-space: nowrap;
 }
@@ -1421,10 +1773,10 @@ select:focus-visible,
 .path-preview {
   margin: 0;
   padding: 10px;
-  border: 1px dashed rgba(46, 64, 69, 0.28);
+  border: 1px dashed color-mix(in srgb, var(--ink-line) 28%, transparent);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.85);
-  color: #2e4b52;
+  background: var(--field);
+  color: var(--ink-1);
   font-family: "SFMono-Regular", Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
   line-height: 1.45;
@@ -1434,10 +1786,10 @@ select:focus-visible,
 .status-text {
   margin: 0;
   padding: 10px;
-  border: 1px solid rgba(47, 111, 105, 0.25);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, transparent);
   border-radius: 10px;
-  background: rgba(227, 246, 242, 0.88);
-  color: #245953;
+  background: var(--accent-wash);
+  color: var(--accent-ink);
   font-size: 13px;
   line-height: 1.45;
 }
@@ -1446,9 +1798,9 @@ select:focus-visible,
   display: flex;
   flex-direction: column;
   gap: 8px;
-  border: 1px solid rgba(46, 64, 69, 0.14);
+  border: 1px solid color-mix(in srgb, var(--ink-line) 14%, transparent);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--card);
   padding: 10px;
 }
 
@@ -1473,9 +1825,9 @@ select:focus-visible,
 }
 
 .merge-list {
-  border: 1px solid rgba(46, 64, 69, 0.16);
+  border: 1px solid color-mix(in srgb, var(--ink-line) 16%, transparent);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.8);
+  background: var(--card);
   overflow: auto;
   max-height: 260px;
   padding: 8px;
@@ -1490,11 +1842,11 @@ select:focus-visible,
   gap: 8px;
   padding: 7px 8px;
   border-radius: 8px;
-  color: #304c53;
+  color: var(--ink-1);
 }
 
 .merge-item:hover {
-  background: rgba(47, 111, 105, 0.08);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 
 .merge-item.disabled {
@@ -1509,7 +1861,7 @@ select:focus-visible,
 
 .merge-group-title {
   margin: 4px 8px 2px;
-  color: #35545a;
+  color: var(--ink-1);
   font-size: 12px;
   font-weight: 600;
 }
@@ -1547,9 +1899,9 @@ select:focus-visible,
 }
 
 .advanced-scope-panel {
-  border: 1px solid rgba(46, 64, 69, 0.16);
+  border: 1px solid color-mix(in srgb, var(--ink-line) 16%, transparent);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--card);
   padding: 10px;
   display: flex;
   flex-direction: column;
@@ -1570,26 +1922,26 @@ select:focus-visible,
 }
 
 .advanced-scope-item {
-  border: 1px solid rgba(46, 64, 69, 0.18);
+  border: 1px solid color-mix(in srgb, var(--ink-line) 18%, transparent);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.86);
+  background: var(--field);
   padding: 8px 10px;
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #2f4b52;
+  color: var(--ink-1);
   cursor: pointer;
   user-select: none;
 }
 
 .advanced-scope-item.checked {
-  border-color: rgba(47, 111, 105, 0.5);
-  background: rgba(236, 249, 246, 0.94);
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: var(--accent-wash);
 }
 
 .advanced-scope-item input {
   margin: 0;
-  accent-color: #2f6f69;
+  accent-color: var(--accent);
 }
 
 .advanced-scope-item span {
@@ -1605,9 +1957,9 @@ select:focus-visible,
 }
 
 .advanced-results {
-  border: 1px solid rgba(46, 64, 69, 0.16);
+  border: 1px solid color-mix(in srgb, var(--ink-line) 16%, transparent);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.78);
+  background: var(--card);
   overflow: auto;
   min-height: 220px;
   max-height: 420px;
@@ -1618,11 +1970,11 @@ select:focus-visible,
 }
 
 .advanced-result {
-  border: 1px solid rgba(46, 64, 69, 0.14);
+  border: 1px solid color-mix(in srgb, var(--ink-line) 14%, transparent);
   border-radius: 12px;
   padding: 10px;
   text-align: left;
-  background: rgba(255, 255, 255, 0.86);
+  background: var(--card);
   cursor: pointer;
   display: flex;
   flex-direction: column;
@@ -1630,19 +1982,19 @@ select:focus-visible,
 }
 
 .advanced-result:hover {
-  border-color: rgba(47, 111, 105, 0.5);
-  background: #f2fbf9;
+  border-color: color-mix(in srgb, var(--accent) 50%, transparent);
+  background: color-mix(in srgb, var(--accent) 6%, var(--card));
 }
 
 .advanced-result.selected {
-  border-color: rgba(47, 111, 105, 0.52);
-  background: rgba(228, 247, 243, 0.95);
+  border-color: color-mix(in srgb, var(--accent) 52%, transparent);
+  background: var(--accent-wash);
 }
 
 .advanced-source {
   white-space: pre-wrap;
   line-height: 1.56;
-  color: #2f4348;
+  color: var(--ink-1);
 }
 
 .advanced-right-column .advanced-results {
@@ -1652,9 +2004,9 @@ select:focus-visible,
 }
 
 .advanced-destination {
-  border: 1px solid rgba(46, 64, 69, 0.16);
+  border: 1px solid color-mix(in srgb, var(--ink-line) 16%, transparent);
   border-radius: 12px;
-  background: rgba(255, 255, 255, 0.72);
+  background: var(--card);
   padding: 10px;
   display: flex;
   flex-direction: column;
@@ -1667,294 +2019,64 @@ select:focus-visible,
   gap: 8px;
 }
 
-.app-shell[data-theme]:not([data-theme="changbian"]) {
-  color: var(--ink-0);
+/* ── 卡片樣式 ─────────────────────────────
+   縹緗：實底紙面卡片，細框淡影。
+   毛玻璃（outline）：欄面半透明並模糊背後的光暈；卡片半透明，框內一圈白色高光。
+   金屬（frosted）：上亮下暗的漸層，上緣一線高光、下緣一線暗影，像一塊金屬薄板。
+   各樣式只換下列變量；懸停、選中等狀態沿用元件本身的規則，不會被樣式蓋掉。 */
+.app-shell {
+  --card-bg: var(--card);
+  --card-edge: var(--line);
+  --card-elev: var(--card-shadow);
+  --card-elev-hover: var(--card-shadow-hover);
+  --group-bg: var(--card-soft);
 }
 
-.app-shell[data-theme]:not([data-theme="changbian"]) .meta-text,
-.app-shell[data-theme]:not([data-theme="changbian"]) .eyebrow,
-.app-shell[data-theme]:not([data-theme="changbian"]) .result-meta,
-.app-shell[data-theme]:not([data-theme="changbian"]) .search-path,
-.app-shell[data-theme]:not([data-theme="changbian"]) .search-snippet,
-.app-shell[data-theme]:not([data-theme="changbian"]) .search-citation,
-.app-shell[data-theme]:not([data-theme="changbian"]) .entry-note-preview,
-.app-shell[data-theme]:not([data-theme="changbian"]) .entry-citation,
-.app-shell[data-theme]:not([data-theme="changbian"]) .modal-label,
-.app-shell[data-theme]:not([data-theme="changbian"]) .format-tip,
-.app-shell[data-theme]:not([data-theme="changbian"]) .advanced-source,
-.app-shell[data-theme]:not([data-theme="changbian"]) .entry-view-title,
-.app-shell[data-theme]:not([data-theme="changbian"]) .entry-view-note,
-.app-shell[data-theme]:not([data-theme="changbian"]) .entry-view-citation,
-.app-shell[data-theme]:not([data-theme="changbian"]) .merge-group-title,
-.app-shell[data-theme]:not([data-theme="changbian"]) .empty-state,
-.app-shell[data-theme]:not([data-theme="changbian"]) .empty-inline,
-.app-shell[data-theme]:not([data-theme="changbian"]) .context-item {
-  color: var(--ink-1);
+.app-shell[data-card-style="outline"] {
+  --card-bg: var(--glass);
+  --card-edge: color-mix(in srgb, var(--ink-line) 8%, transparent);
+  --card-elev: 0 4px 14px rgba(0, 0, 0, 0.04);
+  --group-bg: var(--glass-soft);
 }
 
-.app-shell[data-theme]:not([data-theme="changbian"]) h1,
-.app-shell[data-theme]:not([data-theme="changbian"]) h2,
-.app-shell[data-theme]:not([data-theme="changbian"]) h3,
-.app-shell[data-theme]:not([data-theme="changbian"]) .project-main,
-.app-shell[data-theme]:not([data-theme="changbian"]) .chapter-main,
-.app-shell[data-theme]:not([data-theme="changbian"]) .project-title,
-.app-shell[data-theme]:not([data-theme="changbian"]) .search-time,
-.app-shell[data-theme]:not([data-theme="changbian"]) .entry-snippet,
-.app-shell[data-theme]:not([data-theme="changbian"]) .entry-view-text,
-.app-shell[data-theme]:not([data-theme="changbian"]) .entry-view-source,
-.app-shell[data-theme]:not([data-theme="changbian"]) .path-preview {
-  color: var(--ink-0);
+.app-shell[data-card-style="outline"] .panel {
+  background: var(--glass-panel);
+  backdrop-filter: blur(22px) saturate(1.35);
 }
 
-/* 深色配色搭「縹緗」卡片：基礎樣式的淺色卡底配上深色主題的淺色文字會看不清，改用半透明深底。
-   須放在下方 hover 規則之前，讓 hover 在同等權重下仍能生效。 */
-.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .project-block,
-.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .chapter-row,
-.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .entry-card,
-.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .search-panel,
-.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .export-panel,
-.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .search-item,
-.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .empty-state,
-.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .empty-inline,
-.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .path-preview,
-.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .status-text {
-  border-color: color-mix(in srgb, var(--accent) 28%, rgb(255 255 255 / 0.14));
-  background: color-mix(in srgb, var(--accent) 12%, rgb(255 255 255 / 0.06));
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"])[data-card-style="changbian"] .search-item.selected {
-  border-color: color-mix(in srgb, var(--accent) 68%, transparent);
-  background: color-mix(in srgb, var(--accent) 30%, transparent);
-}
-
-/* 檢索框與範圍下拉框在任何深色配色下都需要深底，否則白字配淺底。 */
-.app-shell[data-theme]:not([data-theme="changbian"]) .search-input {
-  border-color: color-mix(in srgb, var(--accent) 34%, rgb(255 255 255 / 0.18));
-  background: rgb(0 0 0 / 0.28);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .search-input:focus {
-  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .search-input::placeholder {
-  color: var(--ink-1);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .primary-btn {
-  border-color: color-mix(in srgb, var(--accent) 58%, rgb(255 255 255 / 0.2));
-  background: linear-gradient(
-    130deg,
-    color-mix(in srgb, var(--accent) 70%, #11151a),
-    color-mix(in srgb, var(--accent) 52%, #0a0d12)
+.app-shell[data-card-style="frosted"] {
+  /* 細密的豎向拉絲紋，疊在上亮下暗的漸層上。 */
+  --card-bg: repeating-linear-gradient(90deg, var(--metal-grain) 0 1px, transparent 1px 3px),
+    linear-gradient(180deg, var(--metal-a), var(--metal-b));
+  --card-edge: color-mix(in srgb, var(--ink-line) 15%, transparent);
+  --card-elev: inset 0 1px 0 var(--metal-edge), inset 0 -1px 0 var(--metal-shade), 0 2px 6px rgba(0, 0, 0, 0.08);
+  --card-elev-hover: inset 0 1px 0 var(--metal-edge), inset 0 -1px 0 var(--metal-shade),
+    0 8px 20px rgba(0, 0, 0, 0.14);
+  --group-bg: linear-gradient(
+    180deg,
+    color-mix(in srgb, var(--metal-a) 70%, transparent),
+    color-mix(in srgb, var(--metal-b) 45%, transparent)
   );
-  color: var(--ink-0);
-  box-shadow: 0 12px 24px color-mix(in srgb, var(--accent) 32%, transparent);
 }
 
-.app-shell[data-theme]:not([data-theme="changbian"]) .primary-btn:hover {
-  filter: brightness(1.08);
+.app-shell[data-card-style="frosted"] .panel {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--metal-a) 55%, var(--panel)), var(--panel));
+  box-shadow: inset 0 1px 0 var(--metal-edge), var(--shadow);
 }
 
-.app-shell[data-theme]:not([data-theme="changbian"]) .badge,
-.app-shell[data-theme]:not([data-theme="changbian"]) .tag-chip {
-  color: var(--ink-0);
-  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  background: color-mix(in srgb, var(--accent) 25%, transparent);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .secondary-btn {
-  color: var(--ink-0);
-  border-color: color-mix(in srgb, var(--accent) 52%, transparent);
-  background: color-mix(in srgb, var(--accent) 26%, transparent);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .ghost-btn,
-.app-shell[data-theme]:not([data-theme="changbian"]) .scope,
-.app-shell[data-theme]:not([data-theme="changbian"]) .icon-btn {
-  color: var(--ink-0);
-  border-color: color-mix(in srgb, var(--accent) 42%, transparent);
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .format-btn[aria-pressed="true"] {
-  color: white;
-  border-color: var(--accent);
-  background: var(--accent);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .scope.active {
-  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
-  background: color-mix(in srgb, var(--accent) 38%, transparent);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .project-main:hover,
-.app-shell[data-theme]:not([data-theme="changbian"]) .chapter-main:hover,
-.app-shell[data-theme]:not([data-theme="changbian"]) .drag-handle:hover,
-.app-shell[data-theme]:not([data-theme="changbian"]) .search-item:hover,
-.app-shell[data-theme]:not([data-theme="changbian"]) .advanced-result:hover,
-.app-shell[data-theme]:not([data-theme="changbian"]) .advanced-scope-item:hover,
-.app-shell[data-theme]:not([data-theme="changbian"]) .merge-item:hover,
-.app-shell[data-theme]:not([data-theme="changbian"]) .context-item:hover {
-  background: color-mix(in srgb, var(--accent) 24%, transparent);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .entry-card:hover,
-.app-shell[data-theme]:not([data-theme="changbian"]) .search-item:hover,
-.app-shell[data-theme]:not([data-theme="changbian"]) .advanced-result:hover,
-.app-shell[data-theme]:not([data-theme="changbian"]) .advanced-scope-item.checked,
-.app-shell[data-theme]:not([data-theme="changbian"]) .drop-target {
-  border-color: color-mix(in srgb, var(--accent) 68%, transparent);
-  outline-color: color-mix(in srgb, var(--accent) 68%, transparent);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .project-block.active .project-main,
-.app-shell[data-theme]:not([data-theme="changbian"]) .chapter-row.active .chapter-main {
-  background: color-mix(in srgb, var(--accent) 24%, transparent);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .advanced-scope-item {
-  color: var(--ink-0);
-  border-color: color-mix(in srgb, var(--accent) 44%, transparent);
-  background: color-mix(in srgb, var(--accent) 14%, transparent);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .trash-item,
-.app-shell[data-theme]:not([data-theme="changbian"]) .trash-kind,
-.app-shell[data-theme]:not([data-theme="changbian"]) .menu-count-badge {
-  color: var(--ink-0);
-  border-color: color-mix(in srgb, var(--accent) 34%, transparent);
-  background: color-mix(in srgb, var(--accent) 15%, transparent);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .entry-card.selected {
-  border-color: color-mix(in srgb, var(--accent) 68%, transparent);
-  box-shadow: none;
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .context-menu,
-.app-shell[data-theme]:not([data-theme="changbian"]) .workspace-menu {
-  border-color: color-mix(in srgb, var(--accent) 36%, transparent);
-  background: color-mix(in srgb, black 24%, white);
-}
-
-.app-shell[data-theme="obsidian"] .context-menu,
-.app-shell[data-theme="graphite"] .context-menu,
-.app-shell[data-theme="obsidian"] .workspace-menu,
-.app-shell[data-theme="graphite"] .workspace-menu {
-  background: rgb(14 16 20 / 0.96);
-}
-
-.app-shell[data-theme="ocean"] .context-menu,
-.app-shell[data-theme="dusk"] .context-menu,
-.app-shell[data-theme="vaporwave"] .context-menu,
-.app-shell[data-theme="ocean"] .workspace-menu,
-.app-shell[data-theme="dusk"] .workspace-menu,
-.app-shell[data-theme="vaporwave"] .workspace-menu {
-  background: rgb(15 19 26 / 0.94);
-}
-
-.app-shell[data-card-style="outline"] .panel,
-.app-shell[data-card-style="outline"] .search-panel,
-.app-shell[data-card-style="outline"] .export-panel,
-.app-shell[data-card-style="outline"] .project-block,
-.app-shell[data-card-style="outline"] .chapter-row,
-.app-shell[data-card-style="outline"] .entry-card,
-.app-shell[data-card-style="outline"] .search-item,
-.app-shell[data-card-style="outline"] .empty-state,
-.app-shell[data-card-style="outline"] .empty-inline,
-.app-shell[data-card-style="outline"] .modal-card,
-.app-shell[data-card-style="outline"] .merge-list,
-.app-shell[data-card-style="outline"] .advanced-results,
-.app-shell[data-card-style="outline"] .advanced-result,
-.app-shell[data-card-style="outline"] .advanced-scope-panel,
-.app-shell[data-card-style="outline"] .advanced-destination,
-.app-shell[data-card-style="outline"] .path-preview,
-.app-shell[data-card-style="outline"] .status-text {
+/* 毛玻璃的高光邊：畫在框內一圈。 */
+.app-shell[data-card-style="outline"] :is(.empty-state, .empty-inline, .path-preview, .status-text, .project-block) {
   position: relative;
-  border: 1px solid transparent;
-  background: rgb(255 255 255 / 0.14);
-  box-shadow: 0 6px 8px rgb(0 0 0 / 0.03);
-  backdrop-filter: none;
 }
 
-.app-shell[data-card-style="outline"] .panel::before,
-.app-shell[data-card-style="outline"] .search-panel::before,
-.app-shell[data-card-style="outline"] .export-panel::before,
-.app-shell[data-card-style="outline"] .project-block::before,
-.app-shell[data-card-style="outline"] .chapter-row::before,
-.app-shell[data-card-style="outline"] .entry-card::before,
-.app-shell[data-card-style="outline"] .search-item::before,
-.app-shell[data-card-style="outline"] .empty-state::before,
-.app-shell[data-card-style="outline"] .empty-inline::before,
-.app-shell[data-card-style="outline"] .modal-card::before,
-.app-shell[data-card-style="outline"] .merge-list::before,
-.app-shell[data-card-style="outline"] .advanced-results::before,
-.app-shell[data-card-style="outline"] .advanced-result::before,
-.app-shell[data-card-style="outline"] .advanced-scope-panel::before,
-.app-shell[data-card-style="outline"] .advanced-destination::before,
-.app-shell[data-card-style="outline"] .path-preview::before,
-.app-shell[data-card-style="outline"] .status-text::before {
+.app-shell[data-card-style="outline"]
+  :is(.panel, .project-block, .entry-card, .search-item, .empty-state, .empty-inline, .path-preview, .status-text)::before {
   content: "";
   position: absolute;
   inset: 0;
   border-radius: inherit;
   padding: 1px;
-  background: linear-gradient(135deg, rgb(255 255 255 / 0.68), rgb(255 255 255 / 0.42));
-  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
-  -webkit-mask-composite: xor;
-  mask-composite: exclude;
-  pointer-events: none;
-}
-
-.app-shell[data-card-style="frosted"] .panel,
-.app-shell[data-card-style="frosted"] .search-panel,
-.app-shell[data-card-style="frosted"] .export-panel,
-.app-shell[data-card-style="frosted"] .project-block,
-.app-shell[data-card-style="frosted"] .chapter-row,
-.app-shell[data-card-style="frosted"] .entry-card,
-.app-shell[data-card-style="frosted"] .search-item,
-.app-shell[data-card-style="frosted"] .empty-state,
-.app-shell[data-card-style="frosted"] .empty-inline,
-.app-shell[data-card-style="frosted"] .modal-card,
-.app-shell[data-card-style="frosted"] .merge-list,
-.app-shell[data-card-style="frosted"] .advanced-results,
-.app-shell[data-card-style="frosted"] .advanced-result,
-.app-shell[data-card-style="frosted"] .advanced-scope-panel,
-.app-shell[data-card-style="frosted"] .advanced-destination,
-.app-shell[data-card-style="frosted"] .path-preview,
-.app-shell[data-card-style="frosted"] .status-text {
-  position: relative;
-  border: 1px solid transparent;
-  background: linear-gradient(135deg, rgb(255 255 255 / 0.28), rgb(255 255 255 / 0.1)),
-    rgb(255 255 255 / 0.08);
-  box-shadow: 0 6px 14px rgb(0 0 0 / 0.08);
-  backdrop-filter: blur(12px);
-}
-
-.app-shell[data-card-style="frosted"] .panel::before,
-.app-shell[data-card-style="frosted"] .search-panel::before,
-.app-shell[data-card-style="frosted"] .export-panel::before,
-.app-shell[data-card-style="frosted"] .project-block::before,
-.app-shell[data-card-style="frosted"] .chapter-row::before,
-.app-shell[data-card-style="frosted"] .entry-card::before,
-.app-shell[data-card-style="frosted"] .search-item::before,
-.app-shell[data-card-style="frosted"] .empty-state::before,
-.app-shell[data-card-style="frosted"] .empty-inline::before,
-.app-shell[data-card-style="frosted"] .modal-card::before,
-.app-shell[data-card-style="frosted"] .merge-list::before,
-.app-shell[data-card-style="frosted"] .advanced-results::before,
-.app-shell[data-card-style="frosted"] .advanced-result::before,
-.app-shell[data-card-style="frosted"] .advanced-scope-panel::before,
-.app-shell[data-card-style="frosted"] .advanced-destination::before,
-.app-shell[data-card-style="frosted"] .path-preview::before,
-.app-shell[data-card-style="frosted"] .status-text::before {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: inherit;
-  padding: 1px;
-  background: linear-gradient(135deg, rgb(255 255 255 / 0.45), rgb(255 255 255 / 0.12));
+  background: linear-gradient(135deg, var(--gloss-hi), var(--gloss-lo) 55%, var(--gloss-hi));
   -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
   -webkit-mask-composite: xor;
   mask-composite: exclude;
@@ -1996,7 +2118,7 @@ select:focus-visible,
   gap: 2px;
   padding: 3px;
   border-radius: 10px;
-  background: rgba(46, 64, 69, 0.07);
+  background: color-mix(in srgb, var(--ink-line) 7%, transparent);
 }
 
 .segmented button {
@@ -2017,10 +2139,10 @@ select:focus-visible,
 }
 
 .segmented button[aria-pressed="true"] {
-  background: #fff;
+  background: var(--raised);
   color: var(--accent);
   font-weight: 600;
-  box-shadow: 0 1px 2px rgba(20, 32, 34, 0.14), 0 0 0 1px rgba(46, 64, 69, 0.06);
+  box-shadow: 0 1px 2px rgba(20, 32, 34, 0.14), 0 0 0 1px color-mix(in srgb, var(--ink-line) 6%, transparent);
 }
 
 .control-label {
@@ -2036,7 +2158,7 @@ select:focus-visible,
   border: 1px solid var(--stroke);
   border-radius: 8px;
   padding: 3px 10px;
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--button);
   color: var(--ink-0);
   font-size: 12px;
   line-height: 1.5;
@@ -2052,14 +2174,14 @@ select:focus-visible,
 
 .mini-btn-accent {
   border-color: color-mix(in srgb, var(--accent) 45%, transparent);
-  background: color-mix(in srgb, var(--accent) 10%, white);
+  background: color-mix(in srgb, var(--accent) 10%, var(--field));
   color: var(--accent);
   font-weight: 600;
 }
 
 .mini-btn-accent:hover {
   background: var(--accent);
-  color: #fff;
+  color: var(--on-accent);
 }
 
 .text-link {
@@ -2104,7 +2226,7 @@ select:focus-visible,
   margin-left: 4px;
   padding: 0 6px;
   border-radius: 999px;
-  background: rgba(46, 64, 69, 0.08);
+  background: color-mix(in srgb, var(--ink-line) 8%, transparent);
   color: var(--ink-0);
   font-size: 11px;
   text-align: center;
@@ -2120,7 +2242,7 @@ select:focus-visible,
 .rule-chip {
   padding: 1px 8px;
   border-radius: 999px;
-  background: rgba(46, 64, 69, 0.06);
+  background: color-mix(in srgb, var(--ink-line) 6%, transparent);
   color: var(--ink-1);
   font-size: 11px;
   line-height: 1.7;
@@ -2129,7 +2251,7 @@ select:focus-visible,
 .stat-chip {
   padding: 2px 10px;
   border-radius: 999px;
-  background: rgba(46, 64, 69, 0.06);
+  background: color-mix(in srgb, var(--ink-line) 6%, transparent);
   color: var(--ink-1);
   font-size: 12px;
 }
@@ -2143,7 +2265,7 @@ select:focus-visible,
 .metric-chip {
   padding: 0 7px;
   border-radius: 6px;
-  background: rgba(46, 64, 69, 0.06);
+  background: color-mix(in srgb, var(--ink-line) 6%, transparent);
   color: var(--ink-1);
   font-size: 11px;
   line-height: 1.8;
@@ -2164,7 +2286,7 @@ select:focus-visible,
   margin-right: 6px;
   padding: 0 5px;
   border-radius: 4px;
-  background: rgba(46, 64, 69, 0.07);
+  background: color-mix(in srgb, var(--ink-line) 7%, transparent);
   color: var(--ink-1);
   font-size: 11px;
 }
@@ -2249,7 +2371,7 @@ kbd {
   border: 1px solid var(--stroke);
   border-bottom-width: 2px;
   border-radius: 5px;
-  background: rgba(255, 255, 255, 0.75);
+  background: var(--field);
   color: var(--ink-0);
   font: inherit;
   font-size: 11px;
@@ -2267,7 +2389,7 @@ kbd {
   gap: 2px;
   padding: 3px;
   border-radius: 11px;
-  background: rgba(46, 64, 69, 0.07);
+  background: color-mix(in srgb, var(--ink-line) 7%, transparent);
 }
 
 .pane-tab {
@@ -2287,7 +2409,7 @@ kbd {
 }
 
 .pane-tab.active {
-  background: #fff;
+  background: var(--raised);
   color: var(--accent);
   font-weight: 600;
   box-shadow: 0 1px 2px rgba(20, 32, 34, 0.14);
@@ -2331,7 +2453,7 @@ button.rule-chip:hover {
 
 .rule-chip[aria-expanded="true"] {
   border-color: color-mix(in srgb, var(--accent) 60%, transparent);
-  background: #fff;
+  background: var(--raised);
   color: var(--accent);
   box-shadow: 0 1px 2px rgba(20, 32, 34, 0.12);
 }
@@ -2349,7 +2471,7 @@ button.rule-chip:hover {
   padding: 10px 12px;
   border: 1px solid var(--stroke);
   border-radius: 10px;
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--card-soft);
   font-size: 12px;
 }
 
@@ -2408,7 +2530,7 @@ button.rule-chip:hover {
   padding: 10px 12px;
   border: 1px solid color-mix(in srgb, var(--accent) 22%, transparent);
   border-radius: 12px;
-  background: color-mix(in srgb, var(--accent) 7%, rgba(255, 255, 255, 0.6));
+  background: color-mix(in srgb, var(--accent) 7%, var(--card-soft));
 }
 
 .similar-anchor .section-label,
@@ -2464,7 +2586,7 @@ button.rule-chip:hover {
   padding: 6px 10px;
   border-radius: 8px;
   background: rgba(214, 160, 60, 0.14);
-  color: #7a5512;
+  color: color-mix(in srgb, #7a5512 72%, var(--ink-0));
   font-size: 12px;
 }
 
@@ -2477,7 +2599,7 @@ button.rule-chip:hover {
   gap: 8px 16px;
   padding: 8px 10px;
   border-radius: 12px;
-  background: rgba(46, 64, 69, 0.045);
+  background: color-mix(in srgb, var(--ink-line) 4.5%, transparent);
 }
 
 .overview-toolbar {
@@ -2544,9 +2666,9 @@ button.rule-chip:hover {
   max-height: 46vh;
   overflow: auto;
   padding: 12px 14px;
-  border: 1px solid rgba(46, 64, 69, 0.14);
+  border: 1px solid color-mix(in srgb, var(--ink-line) 14%, transparent);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.82);
+  background: var(--card);
 }
 
 .compare-pane-head {
@@ -2571,7 +2693,7 @@ button.rule-chip:hover {
   width: 20px;
   height: 20px;
   border-radius: 6px;
-  color: #fff;
+  color: var(--on-accent);
   font-size: 11px;
   font-weight: 700;
 }
@@ -2594,8 +2716,8 @@ button.rule-chip:hover {
 .compare-citation {
   margin: 0 0 6px;
   padding-bottom: 8px;
-  border-bottom: 1px solid rgba(46, 64, 69, 0.08);
-  color: #51696f;
+  border-bottom: 1px solid color-mix(in srgb, var(--ink-line) 8%, transparent);
+  color: var(--ink-2);
   font-size: 12px;
   line-height: 1.6;
   word-break: break-word;
@@ -2633,6 +2755,13 @@ mark.diff-right {
   opacity: 0.4;
 }
 
+/* 比全文時：對齊段落加一道淡淡的底線，與段落以外零散的相同字區分。 */
+.align-block-whole {
+  text-decoration: underline dotted color-mix(in srgb, var(--accent) 50%, transparent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 5px;
+}
+
 .block-nav {
   display: flex;
   flex-wrap: wrap;
@@ -2652,9 +2781,9 @@ mark.diff-right {
   max-height: 30vh;
   overflow: auto;
   padding: 0 12px 8px;
-  border: 1px solid rgba(46, 64, 69, 0.14);
+  border: 1px solid color-mix(in srgb, var(--ink-line) 14%, transparent);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.6);
+  background: var(--card-soft);
 }
 
 .compare-hunks .section-label {
@@ -2663,7 +2792,7 @@ mark.diff-right {
   z-index: 1;
   margin: 0;
   padding: 8px 0 4px;
-  background: #fdfbf5;
+  background: var(--modal);
 }
 
 .compare-hunks table {
@@ -2689,13 +2818,13 @@ mark.diff-right {
 
 .compare-hunks td {
   padding: 6px;
-  border-bottom: 1px solid rgba(46, 64, 69, 0.07);
+  border-bottom: 1px solid color-mix(in srgb, var(--ink-line) 7%, transparent);
   vertical-align: top;
   word-break: break-word;
 }
 
 .compare-hunks tbody tr:hover {
-  background: rgba(46, 64, 69, 0.035);
+  background: color-mix(in srgb, var(--ink-line) 3.5%, transparent);
 }
 
 .compare-cell {
@@ -2706,7 +2835,7 @@ mark.diff-right {
 
 .compare-context,
 .compare-missing {
-  color: #7d8c90;
+  color: var(--ink-2);
 }
 
 .kind-badge {
@@ -2720,17 +2849,17 @@ mark.diff-right {
 
 .kind-variant {
   background: rgba(214, 160, 60, 0.18);
-  color: #7a5512;
+  color: color-mix(in srgb, #7a5512 72%, var(--ink-0));
 }
 
 .kind-left {
   background: rgba(214, 120, 90, 0.2);
-  color: #8a3f22;
+  color: color-mix(in srgb, #8a3f22 72%, var(--ink-0));
 }
 
 .kind-right {
   background: rgba(70, 140, 200, 0.2);
-  color: #24557d;
+  color: color-mix(in srgb, #24557d 72%, var(--ink-0));
 }
 
 /* ── 相似文本提示：卡片、檢視窗 ─────────────────────── */
@@ -2756,11 +2885,11 @@ mark.diff-right {
   border-radius: 999px;
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--accent) 5%, #fff),
-    color-mix(in srgb, var(--accent) 12%, #fff)
+    color-mix(in srgb, var(--accent) 6%, var(--raised)),
+    color-mix(in srgb, var(--accent) 14%, var(--raised))
   );
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75), 0 1px 2px rgba(20, 32, 34, 0.06);
-  color: color-mix(in srgb, var(--accent) 86%, #000);
+  box-shadow: inset 0 1px 0 var(--gloss-hi), 0 1px 2px rgba(0, 0, 0, 0.06);
+  color: var(--accent-ink);
   font-family: inherit;
   font-size: 11px;
   font-weight: 500;
@@ -2778,7 +2907,7 @@ mark.diff-right {
 
 .similar-badge:hover {
   border-color: color-mix(in srgb, var(--accent) 55%, transparent);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.75), 0 3px 8px color-mix(in srgb, var(--accent) 20%, transparent);
+  box-shadow: inset 0 1px 0 var(--gloss-hi), 0 3px 8px color-mix(in srgb, var(--accent) 20%, transparent);
   transform: translateY(-1px);
 }
 
@@ -2787,8 +2916,8 @@ mark.diff-right {
   border-color: color-mix(in srgb, var(--accent) 40%, transparent);
   background: linear-gradient(
     180deg,
-    color-mix(in srgb, var(--accent) 14%, #fff),
-    color-mix(in srgb, var(--accent) 24%, #fff)
+    color-mix(in srgb, var(--accent) 14%, var(--raised)),
+    color-mix(in srgb, var(--accent) 24%, var(--raised))
   );
 }
 
@@ -2829,7 +2958,7 @@ mark.diff-right {
 }
 
 .entry-similar-list li + li {
-  border-top: 1px solid rgba(46, 64, 69, 0.08);
+  border-top: 1px solid color-mix(in srgb, var(--ink-line) 8%, transparent);
 }
 
 .entry-similar-list li:hover {
@@ -2864,8 +2993,8 @@ mark.diff-right {
   height: 36px;
   border-radius: 50%;
   background: conic-gradient(
-    color-mix(in srgb, var(--accent) 85%, #fff) calc(var(--score) * 1turn),
-    rgba(46, 64, 69, 0.1) 0
+    color-mix(in srgb, var(--accent) 85%, var(--field)) calc(var(--score) * 1turn),
+    color-mix(in srgb, var(--ink-line) 10%, transparent) 0
   );
 }
 
@@ -2875,7 +3004,7 @@ mark.diff-right {
   width: 28px;
   height: 28px;
   border-radius: 50%;
-  background: #fff;
+  background: var(--field);
   color: var(--ink-0);
   font-size: 11px;
   font-weight: 600;
@@ -2906,7 +3035,7 @@ mark.diff-right {
   border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
   border-radius: 6px;
   background: color-mix(in srgb, var(--accent) 10%, transparent);
-  color: color-mix(in srgb, var(--accent) 88%, #000);
+  color: var(--accent-ink);
   font-size: 0.92em;
   text-decoration: none;
   white-space: nowrap;
@@ -2932,7 +3061,7 @@ mark.diff-right {
 
 .entry-ref.is-missing {
   border-bottom-style: dashed;
-  background: rgba(46, 64, 69, 0.06);
+  background: color-mix(in srgb, var(--ink-line) 6%, transparent);
   color: var(--ink-1);
   font-variant-numeric: tabular-nums;
   text-decoration: line-through;
@@ -2956,13 +3085,6 @@ mark.diff-right {
 .entry-ref-head-icon .entry-ref-icon {
   width: 13px;
   height: 13px;
-}
-
-.entry-ref-id {
-  color: var(--ink-0);
-  font-variant-numeric: tabular-nums;
-  letter-spacing: 0.02em;
-  user-select: all;
 }
 
 .backlink-list li {
@@ -3052,9 +3174,9 @@ mark.diff-right {
   align-items: start;
   gap: 12px;
   padding: 12px 14px;
-  border: 1px solid rgba(46, 64, 69, 0.12);
+  border: 1px solid color-mix(in srgb, var(--ink-line) 12%, transparent);
   border-radius: 14px;
-  background: rgba(255, 255, 255, 0.82);
+  background: var(--card);
   transition: border-color 0.15s ease, box-shadow 0.15s ease;
 }
 
@@ -3085,7 +3207,7 @@ mark.diff-right {
   height: 4px;
   margin: 3px 0 4px;
   border-radius: 999px;
-  background: rgba(46, 64, 69, 0.1);
+  background: color-mix(in srgb, var(--ink-line) 10%, transparent);
   overflow: hidden;
 }
 
@@ -3124,7 +3246,7 @@ mark.diff-right {
 }
 
 .overview-source {
-  color: #51696f;
+  color: var(--ink-2);
   font-size: 12px;
   overflow-wrap: anywhere;
 }
@@ -3132,85 +3254,6 @@ mark.diff-right {
 .overview-actions {
   align-self: center;
 }
-
-/* ── 深色配色：主視窗內的新控件（彈窗不在主視窗內，沿用淺色） ── */
-.app-shell[data-theme]:not([data-theme="changbian"]) .segmented,
-.app-shell[data-theme]:not([data-theme="changbian"]) .pane-tabs {
-  background: rgb(255 255 255 / 0.08);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .segmented button[aria-pressed="true"],
-.app-shell[data-theme]:not([data-theme="changbian"]) .pane-tab.active {
-  background: color-mix(in srgb, var(--accent) 40%, transparent);
-  color: var(--ink-0);
-  box-shadow: none;
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .mini-btn {
-  background: rgb(255 255 255 / 0.06);
-  color: var(--ink-0);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .mini-btn-accent {
-  background: color-mix(in srgb, var(--accent) 30%, transparent);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .rule-chip,
-.app-shell[data-theme]:not([data-theme="changbian"]) .metric-chip,
-.app-shell[data-theme]:not([data-theme="changbian"]) .section-count,
-.app-shell[data-theme]:not([data-theme="changbian"]) .citation-label,
-.app-shell[data-theme]:not([data-theme="changbian"]) kbd {
-  background: rgb(255 255 255 / 0.08);
-  color: var(--ink-1);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .entry-ref {
-  background: color-mix(in srgb, var(--accent) 24%, transparent);
-  color: var(--ink-0);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .similar-badge {
-  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
-  background: color-mix(in srgb, var(--accent) 18%, transparent);
-  box-shadow: none;
-  color: var(--ink-0);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .similar-badge.is-strong {
-  background: color-mix(in srgb, var(--accent) 32%, transparent);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .rule-chip.is-changed {
-  background: color-mix(in srgb, var(--accent) 28%, transparent);
-  color: var(--ink-0);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .rule-chip[aria-expanded="true"] {
-  border-color: color-mix(in srgb, var(--accent) 70%, transparent);
-  background: color-mix(in srgb, var(--accent) 36%, transparent);
-  color: var(--ink-0);
-  box-shadow: none;
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .rule-editor {
-  background: rgb(255 255 255 / 0.04);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .metric-strong,
-.app-shell[data-theme]:not([data-theme="changbian"]) .text-link,
-.app-shell[data-theme]:not([data-theme="changbian"]) kbd {
-  color: var(--ink-0);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .metric-accent {
-  background: color-mix(in srgb, var(--accent) 35%, transparent);
-  color: var(--ink-0);
-}
-
-.app-shell[data-theme]:not([data-theme="changbian"]) .similar-anchor {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-}
-
 
 @media (max-width: 1400px) {
   .app-shell {

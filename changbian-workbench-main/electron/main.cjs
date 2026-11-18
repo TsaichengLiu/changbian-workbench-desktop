@@ -3,7 +3,13 @@ const fs = require("fs");
 const os = require("os");
 const { app, BrowserWindow, Menu, clipboard, dialog, ipcMain } = require("electron");
 const { SearchIndexService } = require("./search-index.cjs");
-const { readWorkspaceFile, validateWorkspace, writeWorkspaceFile } = require("./workspace-store.cjs");
+const {
+  knownRevisionIfUnchanged,
+  readWorkspaceFile,
+  removeStaleTempFiles,
+  validateWorkspace,
+  writeWorkspaceFile,
+} = require("./workspace-store.cjs");
 
 const isDev = !app.isPackaged;
 const DEFAULT_SHARED_WORKSPACE_FILE = path.join(os.homedir(), ".changbian-workbench", "workspace.json");
@@ -24,6 +30,14 @@ const MENU_THEME_OPTIONS = [
   { id: "dusk", label: "黃昏" },
   { id: "vaporwave", label: "蒸汽波" },
 ];
+const THEME_BACKGROUNDS = {
+  changbian: "#f3ecdb",
+  obsidian: "#0c0c10",
+  ocean: "#061a2c",
+  graphite: "#1d1e21",
+  dusk: "#2b1b2c",
+  vaporwave: "#1c0d33",
+};
 const MENU_CARD_OPTIONS = [
   { id: "changbian", label: "縹緗" },
   { id: "outline", label: "毛玻璃" },
@@ -220,7 +234,15 @@ function getStorageInfo() {
   };
 }
 
+// 啟動時主程序已讀過一次資料檔；界面隨即來要時若檔案未變，直接交出這份，免得再解析一遍。
+let startupWorkspace = null;
+
 function loadSharedWorkspace() {
+  const cached = startupWorkspace;
+  startupWorkspace = null;
+  if (cached && cached.path === sharedWorkspaceFile && knownRevisionIfUnchanged(sharedWorkspaceFile) === cached.result.revision) {
+    return cached.result;
+  }
   return readWorkspaceFile(sharedWorkspaceFile);
 }
 
@@ -264,6 +286,8 @@ function startWorkspaceWatcher() {
       if (workspaceWatchTimer) clearTimeout(workspaceWatchTimer);
       workspaceWatchTimer = setTimeout(() => {
         workspaceWatchTimer = null;
+        // 本程序自己剛寫入的變動：不必再讀入解析。
+        if (knownRevisionIfUnchanged(sharedWorkspaceFile) === lastInternalWorkspaceRevision) return;
         const result = readWorkspaceFile(sharedWorkspaceFile);
         if (!result.ok || !result.workspace || result.revision === lastInternalWorkspaceRevision) return;
         lastInternalWorkspaceRevision = result.revision;
@@ -432,9 +456,15 @@ ipcMain.handle("clipboard:write-text", (_event, text) => {
   clipboard.writeText(String(text ?? ""));
   return true;
 });
-ipcMain.handle("workspace:save-shared", (_event, workspace, expectedRevision) =>
-  saveSharedWorkspace(workspace, expectedRevision),
-);
+// 存檔成功時界面只需要新版本號，不把整個工作區再傳回去。
+ipcMain.handle("workspace:save-shared", (_event, workspace, expectedRevision) => {
+  const result = saveSharedWorkspace(workspace, expectedRevision);
+  if (result.ok) {
+    const { workspace: _saved, ...rest } = result;
+    return rest;
+  }
+  return result;
+});
 ipcMain.handle("workspace:shared-path", () => sharedWorkspaceFile);
 ipcMain.handle("workspace:storage-info", () => getStorageInfo());
 ipcMain.handle("workspace:set-shared-path", (_event, nextPath, workspace) =>
@@ -544,7 +574,8 @@ function createWindow() {
     minWidth: 1180,
     minHeight: 760,
     titleBarStyle: "hiddenInset",
-    backgroundColor: "#0f1114",
+    // 與當前配色的底色一致（見 styles.css 的 --bg-0），避免載入時閃一下別的顏色。
+    backgroundColor: THEME_BACKGROUNDS[currentAppearance.theme] || THEME_BACKGROUNDS.changbian,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -604,17 +635,35 @@ function createWindow() {
 
 app.whenReady().then(() => {
   setApplicationMenu();
-  const loaded = loadSharedWorkspace();
+  // 清掉上次中斷存檔留下的暫存檔。
+  removeStaleTempFiles(sharedWorkspaceFile);
+  removeStaleTempFiles(SETTINGS_FILE);
+  const loaded = readWorkspaceFile(sharedWorkspaceFile);
+  if (loaded.ok) {
+    startupWorkspace = { path: sharedWorkspaceFile, result: loaded };
+  }
   if (loaded.ok && loaded.workspace) {
     lastInternalWorkspaceRevision = loaded.revision;
-    searchIndexService.syncWorkspace(loaded.workspace);
   }
   startWorkspaceWatcher();
   createWindow();
+  // 先開窗口，再同步檢索索引：索引已是最新時只需核對各條簽名；需要重建也不擋住窗口出現。
+  if (loaded.ok && loaded.workspace) {
+    setImmediate(() => searchIndexService.syncWorkspace(loaded.workspace));
+  }
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) {
+      startWorkspaceWatcher();
       createWindow();
+      // 窗口關著時資料檔可能被 MCP 改過：重新打開時核對一次索引。
+      setImmediate(() => {
+        const reloaded = readWorkspaceFile(sharedWorkspaceFile);
+        if (reloaded.ok && reloaded.workspace) {
+          lastInternalWorkspaceRevision = reloaded.revision;
+          searchIndexService.syncWorkspace(reloaded.workspace);
+        }
+      });
     }
   });
 });
@@ -622,7 +671,12 @@ app.whenReady().then(() => {
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
     app.quit();
+    return;
   }
+  // macOS 關掉窗口後程式仍在背景：停止監看資料檔、關閉索引資料庫（WAL 檔隨之併回並刪除），
+  // 下次打開窗口時再啟用。
+  stopWorkspaceWatcher();
+  searchIndexService.close();
 });
 
 app.on("before-quit", () => {

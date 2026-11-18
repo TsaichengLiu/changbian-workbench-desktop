@@ -7,13 +7,15 @@ import {
   Fragment,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   useTransition,
 } from "react";
 import type { ExportScope } from "./exporters";
-import { isIgnorableChar, toSimplified } from "./search";
+import { applyLightMarkup } from "./light-markup";
+import { isIgnorableChar, toSimplified } from "./text-fold";
 import type { SearchCriteria, SearchResult } from "./search-engine";
 import {
   compareTexts,
@@ -32,11 +34,15 @@ import {
   MIN_MAX_GAP,
   MIN_MIN_BLOCK_CHARS,
   MIN_MIN_SHARED_CHARS,
-  SimilarityIndex,
   type ComparableText,
+  type FrequentFragment,
   type SimilarMatch,
-  type SimilarPair,
 } from "./similarity";
+import type {
+  SimilarPairResult,
+  SimilarityWorkerRequest,
+  SimilarityWorkerResponse,
+} from "./similarity-worker";
 import {
   assignEntryRefIds,
   collectEntryRefs,
@@ -111,15 +117,6 @@ interface AppearanceState {
   cardStyle: UiCardStyleId;
 }
 
-interface BookgetThemePreset {
-  background: [string, string, string];
-  accent: string;
-  glowA: string;
-  glowB: string;
-  ambientA: string;
-  ambientB: string;
-}
-
 const DEFAULT_APPEARANCE: AppearanceState = {
   theme: "changbian",
   cardStyle: "changbian",
@@ -127,49 +124,6 @@ const DEFAULT_APPEARANCE: AppearanceState = {
 
 const UI_THEME_IDS: UiThemeId[] = ["changbian", "obsidian", "ocean", "graphite", "dusk", "vaporwave"];
 const UI_CARD_STYLE_IDS: UiCardStyleId[] = ["changbian", "outline", "frosted"];
-
-const BOOKGET_THEME_PRESETS: Record<Exclude<UiThemeId, "changbian">, BookgetThemePreset> = {
-  obsidian: {
-    background: ["rgb(6% 6% 8%)", "rgb(2% 2% 3%)", "rgb(0% 0% 0%)"],
-    accent: "rgb(84% 80% 72%)",
-    glowA: "rgb(84% 80% 72% / 0.22)",
-    glowB: "rgb(100% 100% 100% / 0.07)",
-    ambientA: "rgb(84% 80% 72% / 0.3)",
-    ambientB: "rgb(100% 100% 100% / 0.07)",
-  },
-  ocean: {
-    background: ["rgb(5% 15% 24%)", "rgb(4% 36% 49%)", "rgb(8% 56% 52%)"],
-    accent: "rgb(45% 84% 90%)",
-    glowA: "rgb(45% 84% 90% / 0.22)",
-    glowB: "rgb(45% 84% 90% / 0.14)",
-    ambientA: "rgb(45% 84% 90% / 0.3)",
-    ambientB: "rgb(45% 84% 90% / 0.2)",
-  },
-  graphite: {
-    background: ["rgb(10% 10% 12%)", "rgb(14% 16% 20%)", "rgb(20% 21% 25%)"],
-    accent: "rgb(76% 80% 90%)",
-    glowA: "rgb(76% 80% 90% / 0.22)",
-    glowB: "rgb(100% 100% 100% / 0.07)",
-    ambientA: "rgb(76% 80% 90% / 0.3)",
-    ambientB: "rgb(100% 100% 100% / 0.07)",
-  },
-  dusk: {
-    background: ["rgb(35% 20% 17%)", "rgb(31% 14% 23%)", "rgb(11% 10% 20%)"],
-    accent: "rgb(94% 72% 57%)",
-    glowA: "rgb(94% 72% 57% / 0.22)",
-    glowB: "rgb(94% 72% 57% / 0.14)",
-    ambientA: "rgb(94% 72% 57% / 0.3)",
-    ambientB: "rgb(94% 72% 57% / 0.2)",
-  },
-  vaporwave: {
-    background: ["rgb(20% 10% 28%)", "rgb(56% 16% 46%)", "rgb(28% 24% 50%)"],
-    accent: "rgb(93% 53% 79%)",
-    glowA: "rgb(93% 53% 79% / 0.22)",
-    glowB: "rgb(93% 53% 79% / 0.14)",
-    ambientA: "rgb(93% 53% 79% / 0.3)",
-    ambientB: "rgb(93% 53% 79% / 0.2)",
-  },
-};
 
 function isUiThemeId(value: string): value is UiThemeId {
   return UI_THEME_IDS.includes(value as UiThemeId);
@@ -197,74 +151,6 @@ function loadAppearance(): AppearanceState {
   } catch {
     return DEFAULT_APPEARANCE;
   }
-}
-
-function bookgetTone(theme: Exclude<UiThemeId, "changbian">, cardStyle: UiCardStyleId): {
-  primary: string;
-  secondary: string;
-} {
-  const isFrosted = cardStyle === "frosted";
-  if (theme === "obsidian" || theme === "graphite") {
-    return {
-      primary: isFrosted ? "rgb(100% 100% 100% / 0.95)" : "rgb(100% 100% 100% / 0.96)",
-      secondary: isFrosted ? "rgb(100% 100% 100% / 0.75)" : "rgb(100% 100% 100% / 0.74)",
-    };
-  }
-  if (theme === "ocean") {
-    return {
-      primary: isFrosted ? "rgb(100% 100% 100% / 0.97)" : "rgb(100% 100% 100% / 0.98)",
-      secondary: isFrosted ? "rgb(100% 100% 100% / 0.82)" : "rgb(100% 100% 100% / 0.8)",
-    };
-  }
-  if (theme === "dusk") {
-    return {
-      primary: isFrosted ? "rgb(100% 95% 90%)" : "rgb(100% 95% 89%)",
-      secondary: isFrosted ? "rgb(95% 85% 78%)" : "rgb(92% 80% 72%)",
-    };
-  }
-  return {
-    primary: isFrosted ? "rgb(98% 94% 99%)" : "rgb(97% 92% 99%)",
-    secondary: isFrosted ? "rgb(92% 82% 91%)" : "rgb(88% 76% 88%)",
-  };
-}
-
-function appearanceVars(appearance: AppearanceState): CSSProperties {
-  const vars: Record<string, string> = {
-    "--bg-0": "#f5f0e5",
-    "--bg-1": "#ede5d6",
-    "--bg-2": "#e7ddcb",
-    "--bg-glow-a": "rgba(47, 111, 105, 0.2)",
-    "--bg-glow-b": "rgba(188, 129, 91, 0.22)",
-    "--ambient-a": "rgba(210, 165, 112, 0.32)",
-    "--ambient-b": "rgba(47, 111, 105, 0.26)",
-    "--ink-0": "#1f2527",
-    "--ink-1": "#405057",
-    "--accent": "#2f6f69",
-    "--panel": "rgba(248, 244, 234, 0.82)",
-    "--stroke": "rgba(46, 64, 69, 0.2)",
-    "--shadow": "0 18px 42px rgba(46, 52, 55, 0.15)",
-  };
-
-  if (appearance.theme !== "changbian") {
-    const preset = BOOKGET_THEME_PRESETS[appearance.theme];
-    const tone = bookgetTone(appearance.theme, appearance.cardStyle === "outline" ? "outline" : "frosted");
-
-    vars["--bg-0"] = preset.background[0];
-    vars["--bg-1"] = preset.background[1];
-    vars["--bg-2"] = preset.background[2];
-    vars["--bg-glow-a"] = preset.glowA;
-    vars["--bg-glow-b"] = preset.glowB;
-    vars["--ambient-a"] = preset.ambientA;
-    vars["--ambient-b"] = preset.ambientB;
-    vars["--accent"] = preset.accent;
-    vars["--ink-0"] = tone.primary;
-    vars["--ink-1"] = tone.secondary;
-    vars["--panel"] = "rgb(255 255 255 / 0.14)";
-    vars["--stroke"] = "rgb(255 255 255 / 0.24)";
-    vars["--shadow"] = "0 18px 42px rgb(0 0 0 / 0.34)";
-  }
-
-  return vars as CSSProperties;
 }
 
 const TAG_REGEX = /#([^\s#，。；、,.;:!?！？【】（）()<>《》]+)/g;
@@ -317,15 +203,6 @@ type ModalState =
   | { kind: "chapter-create"; projectId: string; value: string; insertAfterChapterId: string | null }
   | { kind: "chapter-rename"; chapterId: string; value: string }
   | {
-      kind: "entry-view";
-      entryId: string;
-      editing: boolean;
-      draft: EntryDraft;
-      highlightQuery?: string;
-      // 經由備註中的鏈接一路點過來的條目，「返回」時依次回到上一條。
-      backStack?: string[];
-    }
-  | {
       kind: "entry-create";
       projectId: string;
       chapterId: string;
@@ -370,13 +247,27 @@ interface ModalDragState {
   maxY: number;
 }
 
+// 一個「檢視史料」窗口。可同時打開多個；它們浮在主界面上，不阻擋主界面操作。
+interface EntryViewWindow {
+  winId: string;
+  entryId: string;
+  editing: boolean;
+  draft: EntryDraft;
+  highlightQuery: string;
+}
+
+const ENTRY_VIEW_WINDOW_LIMIT = 8;
+
+function entryViewKey(winId: string): string {
+  return `view:${winId}`;
+}
+
 type OverlayModalKey =
   | "storage"
   | "trash"
   | "storage-save-as"
   | "storage-format-info"
   | "form"
-  | "entry-view"
   | "entry-form"
   | "advanced"
   | "merge-project"
@@ -390,7 +281,6 @@ const OVERLAY_MODAL_KEYS: OverlayModalKey[] = [
   "storage-save-as",
   "storage-format-info",
   "form",
-  "entry-view",
   "entry-form",
   "advanced",
   "merge-project",
@@ -454,7 +344,6 @@ function createOverlayModalMap<T>(value: T): Record<OverlayModalKey, T> {
     "storage-save-as": value,
     "storage-format-info": value,
     form: value,
-    "entry-view": value,
     "entry-form": value,
     advanced: value,
     "merge-project": value,
@@ -483,7 +372,8 @@ type AdvancedQueryScope =
   | "summary"
   | "source"
   | "note"
-  | "citation";
+  | "citation"
+  | "refId";
 
 const ADVANCED_QUERY_SCOPE_OPTIONS: Array<{ value: AdvancedQueryScope; label: string }> = [
   { value: "project", label: "專案" },
@@ -493,6 +383,7 @@ const ADVANCED_QUERY_SCOPE_OPTIONS: Array<{ value: AdvancedQueryScope; label: st
   { value: "source", label: "史料" },
   { value: "note", label: "備註" },
   { value: "citation", label: "引文" },
+  { value: "refId", label: "編號" },
 ];
 
 const DEFAULT_ADVANCED_QUERY_SCOPES: AdvancedQueryScope[] = ADVANCED_QUERY_SCOPE_OPTIONS.map(
@@ -935,8 +826,9 @@ function prependTrashItem(workspace: WorkspaceData, item: TrashItem): void {
   workspace.trash = [item, ...workspace.trash].slice(0, TRASH_ITEM_LIMIT);
 }
 
-function cleanupWorkspace(workspace: WorkspaceData): WorkspaceData {
-  const next = structuredClone(workspace);
+// owned 為 true 表示傳入的已是可以直接修改的副本（如 mutateWorkspace 的草稿），不再複製一份。
+function cleanupWorkspace(workspace: WorkspaceData, owned = false): WorkspaceData {
+  const next = owned ? workspace : structuredClone(workspace);
   next.schemaVersion = WORKSPACE_SCHEMA_VERSION;
   next.revision = Number.isInteger(next.revision) && next.revision >= 0 ? next.revision : 0;
   next.trash = (Array.isArray(next.trash) ? next.trash : [])
@@ -1069,14 +961,47 @@ function createInitialWorkspace(): WorkspaceData {
   };
 }
 
+// 工作區的內容物件一經產生就不再原地修改（改動都經 mutateWorkspace 產生新物件），
+// 所以只要條目、專案、章節、回收站與專案次序都還是同一批物件，簽名就不變。
+// 切換選中條目等只換外層物件的操作，不必重新序列化整個工作區。
+interface CachedSignature {
+  projectOrder: WorkspaceData["projectOrder"];
+  projects: WorkspaceData["projects"];
+  chapters: WorkspaceData["chapters"];
+  trash: WorkspaceData["trash"];
+  signature: string;
+}
+
+const workspaceSignatureCache = new WeakMap<object, CachedSignature>();
+
 function workspaceContentSignature(workspace: WorkspaceData): string {
-  return JSON.stringify({
+  const cached = workspace.entries ? workspaceSignatureCache.get(workspace.entries) : undefined;
+  if (
+    cached &&
+    cached.projectOrder === workspace.projectOrder &&
+    cached.projects === workspace.projects &&
+    cached.chapters === workspace.chapters &&
+    cached.trash === workspace.trash
+  ) {
+    return cached.signature;
+  }
+  const signature = JSON.stringify({
     projectOrder: workspace.projectOrder,
     projects: workspace.projects,
     chapters: workspace.chapters,
     entries: workspace.entries,
     trash: workspace.trash,
   });
+  if (workspace.entries) {
+    workspaceSignatureCache.set(workspace.entries, {
+      projectOrder: workspace.projectOrder,
+      projects: workspace.projects,
+      chapters: workspace.chapters,
+      trash: workspace.trash,
+      signature,
+    });
+  }
+  return signature;
 }
 
 // localStorage 超出配額時 setItem 會拋錯；不能讓它中斷資料檔存檔。
@@ -1284,14 +1209,16 @@ function wrapTextRanges(text: string, ranges: Array<{ start: number; end: number
   return html + escapeHtml(text.slice(cursor));
 }
 
-// 只比對齊段落時的一欄：段落以外的文字淡化，段落內標出相同或不同的字；
-// 每段包一層 data-block，供跳轉。blocks 為此欄的 token 區間及其段號。
+// 有對齊段落時的一欄：段落內標出相同或不同的字，每段包一層 data-block，供跳轉。
+// 只比段落時（dimOutside）段落以外的文字淡化；比全文時段落以外照樣標出，段落加淡淡的底線。
+// blocks 為此欄的 token 區間及其段號。
 function renderAlignedText(
   text: string,
   comparable: ComparableText,
   ranges: Array<{ start: number; end: number }>,
   blocks: Array<{ start: number; end: number; index: number }>,
   className: string,
+  dimOutside: boolean,
 ): string {
   const spans = blocks
     .map((block) => ({
@@ -1300,23 +1227,28 @@ function renderAlignedText(
       end: comparable.ends[block.end - 1],
     }))
     .sort((x, y) => x.start - y.start);
+  const piece = (start: number, end: number) =>
+    wrapTextRanges(
+      text.slice(start, end),
+      ranges
+        .filter((range) => range.start < end && range.end > start)
+        .map((range) => ({ start: Math.max(range.start, start) - start, end: Math.min(range.end, end) - start })),
+      className,
+    );
+  const outside = (start: number, end: number) =>
+    dimOutside ? `<span class="diff-outside">${escapeHtml(text.slice(start, end))}</span>` : piece(start, end);
+  const blockClass = dimOutside ? "align-block" : "align-block align-block-whole";
   let html = "";
   let cursor = 0;
   for (const span of spans) {
     if (span.start > cursor) {
-      html += `<span class="diff-outside">${escapeHtml(text.slice(cursor, span.start))}</span>`;
+      html += outside(cursor, span.start);
     }
-    const inner = ranges
-      .filter((range) => range.start < span.end && range.end > span.start)
-      .map((range) => ({
-        start: Math.max(range.start, span.start) - span.start,
-        end: Math.min(range.end, span.end) - span.start,
-      }));
-    html += `<span class="align-block" data-block="${span.index}">${wrapTextRanges(text.slice(span.start, span.end), inner, className)}</span>`;
+    html += `<span class="${blockClass}" data-block="${span.index}">${piece(span.start, span.end)}</span>`;
     cursor = span.end;
   }
   if (cursor < text.length) {
-    html += `<span class="diff-outside">${escapeHtml(text.slice(cursor))}</span>`;
+    html += outside(cursor, text.length);
   }
   return html;
 }
@@ -1325,13 +1257,6 @@ function wrapHighlightRanges(text: string, tokens: string[]): string {
   return wrapTextRanges(text, findHighlightRanges(text, tokens), "match-highlight");
 }
 
-function applyLightMarkup(html: string): string {
-  return html
-    .replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>")
-    .replace(/__([^_\n]+)__/g, "<u>$1</u>")
-    .replace(/\*([^*\n]+)\*/g, "<em>$1</em>")
-    .replace(/\r?\n/g, "<br />");
-}
 
 // 切片時不要把擴展區漢字的代理對切成兩半。
 function codePointBoundary(text: string, index: number): number {
@@ -1584,9 +1509,8 @@ function App() {
   const [selectedEntryIds, setSelectedEntryIds] = useState<string[]>([]);
   const [navigationScope, setNavigationScope] = useState<NavigationScope>("entry");
   const [modalOffsets, setModalOffsets] = useState<Record<string, { x: number; y: number }>>({});
-  const [modalOrders, setModalOrders] = useState<Record<OverlayModalKey, number>>(
-    () => createOverlayModalMap(0),
-  );
+  // 鍵為固定彈窗名，或檢視窗的 view:<winId>。
+  const [modalOrders, setModalOrders] = useState<Record<string, number>>(() => createOverlayModalMap(0));
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [advancedResults, setAdvancedResults] = useState<SearchResult[]>([]);
   const [selectedSearchResultEntryId, setSelectedSearchResultEntryId] = useState<string | null>(null);
@@ -1608,6 +1532,11 @@ function App() {
     window.workspaceBridge?.saveSharedWorkspace ? "saved" : "local",
   );
   const [modalState, setModalState] = useState<ModalState>(null);
+  const [entryViews, setEntryViews] = useState<EntryViewWindow[]>([]);
+  const entryViewsRef = useRef(entryViews);
+  entryViewsRef.current = entryViews;
+  // 剛打開或提到最前的檢視窗：渲染後把焦點移進去（Esc 才會關到它）。
+  const pendingViewFocusRef = useRef<string | null>(null);
   const [rightPaneTab, setRightPaneTab] = useState<RightPaneTab>("search");
   const [similarAnchorEntryId, setSimilarAnchorEntryId] = useState<string | null>(null);
   const [compareState, setCompareState] = useState<CompareState | null>(null);
@@ -1703,11 +1632,15 @@ function App() {
   // 從相似列表跳到某條時，不改變「與哪一條比較」的錨點。
   const keepSimilarAnchorRef = useRef(false);
   const modalOrderCounterRef = useRef(0);
-  const modalOpenStateRef = useRef<Record<OverlayModalKey, boolean>>(createOverlayModalMap(false));
+  const modalOpenStateRef = useRef<Record<string, boolean>>(createOverlayModalMap(false));
   const previousFocusedElementRef = useRef<HTMLElement | null>(null);
   const workspaceRef = useRef(workspace);
   const sharedRevisionRef = useRef(workspace.revision);
-  const lastPersistedSignatureRef = useRef(localWorkspaceNeedsSave ? "" : workspaceContentSignature(workspace));
+  // useRef 的參數每次渲染都會求值；簽名要序列化整個工作區，只在首次渲染時算一次。
+  const [initialPersistedSignature] = useState(() =>
+    localWorkspaceNeedsSave ? "" : workspaceContentSignature(workspace),
+  );
+  const lastPersistedSignatureRef = useRef(initialPersistedSignature);
   const workspaceSaveTimerRef = useRef<number | null>(null);
   const workspaceSaveInFlightRef = useRef(false);
   const workspaceSaveQueuedRef = useRef(false);
@@ -1723,7 +1656,6 @@ function App() {
   const activeChapter = workspace.activeChapterId
     ? workspace.chapters[workspace.activeChapterId] ?? null
     : null;
-  const appShellStyle = useMemo(() => appearanceVars(appearance), [appearance]);
 
   const currentEntryIds = useMemo(() => activeEntryIds(workspace), [workspace]);
   const currentEntries = useMemo(
@@ -2015,27 +1947,18 @@ function App() {
     }
   }, [workspace.selectedEntryId]);
 
-  // 只在打開「相似」頁或總覽時建索引；條目內容未變時沿用快取，重建很快。
-  const similarityIndex = useMemo(
-    () =>
-      rightPaneTab === "similar" || similarOverviewOpen
-        ? new SimilarityIndex(
-            Object.values(workspace.entries).map((entry) => ({ id: entry.id, text: entry.sourceText })),
-            {
-              gramSize: similarGramSize,
-              minBlockChars: similarMinBlock,
-              minSharedChars: similarMinShared,
-              maxGap: similarMaxGap,
-              strict: similarStrict,
-              minOrderConsistency: similarMinOrder / 100,
-              ignoreFrequentFragments: similarIgnoreFrequent,
-            },
-          )
-        : null,
+  // 相似文本在背景線程計算（見 similarity-worker.ts）：界面只送出改動過的原文，收回結果。
+  const similarOptions = useMemo(
+    () => ({
+      gramSize: similarGramSize,
+      minBlockChars: similarMinBlock,
+      minSharedChars: similarMinShared,
+      maxGap: similarMaxGap,
+      strict: similarStrict,
+      minOrderConsistency: similarMinOrder / 100,
+      ignoreFrequentFragments: similarIgnoreFrequent,
+    }),
     [
-      rightPaneTab,
-      similarOverviewOpen,
-      workspace.entries,
       similarGramSize,
       similarMinBlock,
       similarMinShared,
@@ -2045,55 +1968,110 @@ function App() {
       similarIgnoreFrequent,
     ],
   );
-  // 全庫每條的相似文本，在背景（停止改動片刻後）計算，供卡片與檢視窗顯示提示。
-  const [similarSummary, setSimilarSummary] = useState<Map<string, SimilarSummaryItem[]>>(() => new Map());
+  const similarityWorkerRef = useRef<Worker | null>(null);
+  // 已送進背景線程的各條原文與規則，用來算出這次要送的增量。
+  const similaritySentTextsRef = useRef(new Map<string, string>());
+  const similaritySentOptionsRef = useRef<typeof similarOptions | null>(null);
+  const similarPairsRequestRef = useRef(0);
+  const similarAnchorRequestRef = useRef(0);
+  // 每送一次增量加一，右欄據此重新查詢當前條目的相似文本。
+  const [similarityVersion, setSimilarityVersion] = useState(0);
+  const [similarPairs, setSimilarPairs] = useState<SimilarPairResult[]>([]);
+  const [frequentFragments, setFrequentFragments] = useState<FrequentFragment[]>([]);
+  const [similarAnchorResult, setSimilarAnchorResult] = useState<{
+    anchorId: string;
+    matches: SimilarMatch[];
+  } | null>(null);
+
+  useEffect(() => {
+    if (typeof Worker === "undefined") {
+      return;
+    }
+    const worker = new Worker(new URL("./similarity-worker.ts", import.meta.url), { type: "module" });
+    similarityWorkerRef.current = worker;
+    const handleMessage = (event: MessageEvent<SimilarityWorkerResponse>) => {
+      const message = event.data;
+      if (message?.type === "pairs" && message.requestId === similarPairsRequestRef.current) {
+        setSimilarPairs(message.pairs);
+        setFrequentFragments(message.frequentFragments);
+      } else if (message?.type === "similar" && message.requestId === similarAnchorRequestRef.current) {
+        setSimilarAnchorResult({ anchorId: message.anchorId, matches: message.matches });
+        setFrequentFragments(message.frequentFragments);
+      }
+    };
+    worker.addEventListener("message", handleMessage);
+    return () => {
+      worker.removeEventListener("message", handleMessage);
+      worker.terminate();
+      similarityWorkerRef.current = null;
+      // 線程重建後須重新送全部原文。
+      similaritySentTextsRef.current = new Map();
+      similaritySentOptionsRef.current = null;
+    };
+  }, []);
+
+  // 停止改動片刻後，把改過的原文送去重算；改章名、排序等不動原文的操作不觸發計算。
   useEffect(() => {
     const timer = window.setTimeout(() => {
-      const entries = workspace.entries;
-      const index = new SimilarityIndex(
-        Object.values(entries).map((entry) => ({ id: entry.id, text: entry.sourceText })),
-        {
-          gramSize: similarGramSize,
-          minBlockChars: similarMinBlock,
-          minSharedChars: similarMinShared,
-          maxGap: similarMaxGap,
-          strict: similarStrict,
-          minOrderConsistency: similarMinOrder / 100,
-          ignoreFrequentFragments: similarIgnoreFrequent,
-        },
-      );
-      const summary = new Map<string, SimilarSummaryItem[]>();
-      const add = (fromId: string, item: SimilarSummaryItem) => {
-        const list = summary.get(fromId);
-        if (list) {
-          list.push(item);
-        } else {
-          summary.set(fromId, [item]);
+      const worker = similarityWorkerRef.current;
+      if (!worker) {
+        return;
+      }
+      const sent = similaritySentTextsRef.current;
+      const upserts: Array<{ id: string; text: string }> = [];
+      const removes: string[] = [];
+      for (const entry of Object.values(workspace.entries)) {
+        if (sent.get(entry.id) !== entry.sourceText) {
+          upserts.push({ id: entry.id, text: entry.sourceText });
         }
-      };
-      for (const { aId, bId, match } of index.findAllPairs()) {
-        const copy = entries[aId]?.sourceText === entries[bId]?.sourceText;
-        const shared = { score: match.score, sharedChars: match.sharedChars, identity: match.identity, copy };
-        add(aId, { entryId: bId, ...shared });
-        add(bId, { entryId: aId, ...shared });
       }
-      // 相似的排前面，完全相同的副本排在後面。
-      for (const list of summary.values()) {
-        list.sort((x, y) => Number(x.copy) - Number(y.copy) || y.score - x.score);
+      for (const id of sent.keys()) {
+        if (!workspace.entries[id]) {
+          removes.push(id);
+        }
       }
-      setSimilarSummary(summary);
+      if (!upserts.length && !removes.length && similaritySentOptionsRef.current === similarOptions) {
+        return;
+      }
+      for (const { id, text } of upserts) {
+        sent.set(id, text);
+      }
+      for (const id of removes) {
+        sent.delete(id);
+      }
+      similaritySentOptionsRef.current = similarOptions;
+      const sync: SimilarityWorkerRequest = { type: "sync", upserts, removes, options: similarOptions };
+      worker.postMessage(sync);
+      similarPairsRequestRef.current += 1;
+      const request: SimilarityWorkerRequest = { type: "pairs", requestId: similarPairsRequestRef.current };
+      worker.postMessage(request);
+      setSimilarityVersion((version) => version + 1);
     }, 400);
     return () => window.clearTimeout(timer);
-  }, [
-    workspace.entries,
-    similarGramSize,
-    similarMinBlock,
-    similarMinShared,
-    similarMaxGap,
-    similarStrict,
-    similarMinOrder,
-    similarIgnoreFrequent,
-  ]);
+  }, [workspace.entries, similarOptions]);
+
+  // 全庫每條的相似文本，供卡片與檢視窗顯示提示。
+  const similarSummary = useMemo(() => {
+    const summary = new Map<string, SimilarSummaryItem[]>();
+    const add = (fromId: string, item: SimilarSummaryItem) => {
+      const list = summary.get(fromId);
+      if (list) {
+        list.push(item);
+      } else {
+        summary.set(fromId, [item]);
+      }
+    };
+    for (const { aId, bId, match, copy } of similarPairs) {
+      const shared = { score: match.score, sharedChars: match.sharedChars, identity: match.identity, copy };
+      add(aId, { entryId: bId, ...shared });
+      add(bId, { entryId: aId, ...shared });
+    }
+    // 相似的排前面，完全相同的副本排在後面。
+    for (const list of summary.values()) {
+      list.sort((x, y) => Number(x.copy) - Number(y.copy) || y.score - x.score);
+    }
+    return summary;
+  }, [similarPairs]);
 
   function renderSimilarBadge(entryId: string, onActivate: () => void, hint: string) {
     const list = similarSummary.get(entryId);
@@ -2182,28 +2160,12 @@ function App() {
       .join("");
   }
 
-  // 打開鏈接的條目：在檢視窗中點擊時記下來處，可「返回」。
+  // 打開鏈接的條目：另開一個檢視窗（已打開就提到最前），可與原窗並排對照。
   function openEntryRef(refId: string): void {
     const target = entryByRefId.get(refId);
-    if (!target) {
-      return;
+    if (target) {
+      beginViewEntry(target.id);
     }
-    if (modalState?.kind === "entry-view" && !modalState.editing) {
-      if (modalState.entryId === target.id) {
-        return;
-      }
-      activateOverlayModal("entry-view");
-      setModalState({
-        kind: "entry-view",
-        entryId: target.id,
-        editing: false,
-        draft: entryToDraft(target),
-        highlightQuery: "",
-        backStack: [...(modalState.backStack ?? []), modalState.entryId],
-      });
-      return;
-    }
-    beginViewEntry(target.id);
   }
 
   // 事件委派：點擊 dangerouslySetInnerHTML 中的鏈接。
@@ -2223,34 +2185,8 @@ function App() {
     }
   }
 
-  // 檢視窗的「返回」：回到上一條；已無來處（或來處已刪除）時關閉。
-  function goBackInEntryView(): void {
-    if (modalState?.kind !== "entry-view") {
-      return;
-    }
-    const stack = [...(modalState.backStack ?? [])];
-    while (stack.length > 0) {
-      const previous = workspace.entries[stack.pop() as string];
-      if (previous) {
-        setModalState({
-          kind: "entry-view",
-          entryId: previous.id,
-          editing: false,
-          draft: entryToDraft(previous),
-          highlightQuery: "",
-          backStack: stack,
-        });
-        return;
-      }
-    }
-    setModalState(null);
-  }
-
-  // 從比勘窗打開某條的檢視窗：疊在比勘窗之上，關閉後回到比勘。正在編輯時不覆蓋未保存的內容。
+  // 從比勘窗打開某條的檢視窗：疊在比勘窗之上，關閉後回到比勘。
   function viewEntryFromCompare(entryId: string): void {
-    if (modalState && (modalState.kind !== "entry-view" || modalState.editing)) {
-      return;
-    }
     beginViewEntry(entryId);
   }
 
@@ -2287,7 +2223,7 @@ function App() {
     {
       key: "frequent",
       label: similarIgnoreFrequent
-        ? `忽略高頻片段 ${similarityIndex?.frequentFragments.length ?? 0} 個`
+        ? `忽略高頻片段 ${frequentFragments.length} 個`
         : "不忽略高頻片段",
       changed: !similarIgnoreFrequent,
     },
@@ -2415,13 +2351,13 @@ function App() {
             <p className="rule-editor-note">
               出現在超過 {Math.round(FREQUENT_FRAGMENT_SHARE * 100)}% 條目、且多於 {FREQUENT_FRAGMENT_MIN_ENTRIES}{" "}
               條的片段（多爲紀年、套語），不作爲起對的依據。
-              {similarityIndex && similarityIndex.frequentFragments.length > 0
-                ? `目前有 ${similarityIndex.frequentFragments.length} 個：`
+              {frequentFragments.length > 0
+                ? `目前有 ${frequentFragments.length} 個：`
                 : "目前沒有。"}
             </p>
-            {similarityIndex && similarityIndex.frequentFragments.length > 0 && (
+            {frequentFragments.length > 0 && (
               <div className="frequent-fragments">
-                {similarityIndex.frequentFragments.slice(0, 80).map((fragment) => (
+                {frequentFragments.slice(0, 80).map((fragment) => (
                   <span key={fragment.text} className="frequent-fragment" title={`出現在 ${fragment.entryCount} 條中`}>
                     {fragment.text}
                     <small>{fragment.entryCount}</small>
@@ -2478,18 +2414,16 @@ function App() {
     );
   }
 
-  // 全庫相似對：只在總覽打開時計算。
+  // 全庫相似對：沿用背景線程算好的結果，這裡只做篩選與排序。
   const similarOverview = useMemo(() => {
-    if (!similarOverviewOpen || !similarityIndex) {
+    if (!similarOverviewOpen) {
       return null;
     }
-    const isCopy = (pair: SimilarPair) =>
-      workspace.entries[pair.aId]?.sourceText === workspace.entries[pair.bId]?.sourceText;
-    const allPairs = similarityIndex.findAllPairs();
-    const copyCount = allPairs.filter(isCopy).length;
+    const allPairs = similarPairs;
+    const copyCount = allPairs.filter((pair) => pair.copy).length;
     const { minScore, hideCopies, crossChapterOnly, sortBy } = similarOverviewFilter;
     const pairs = allPairs
-      .filter((pair) => !hideCopies || !isCopy(pair))
+      .filter((pair) => !hideCopies || !pair.copy)
       .filter((pair) => pair.match.score >= minScore)
       .filter(
         (pair) =>
@@ -2501,23 +2435,43 @@ function App() {
       pairs.sort((a, b) => (b.match.orderConsistency ?? -1) - (a.match.orderConsistency ?? -1));
     }
     return { pairs, total: allPairs.length, copyCount };
-  }, [similarOverviewOpen, similarityIndex, similarOverviewFilter, workspace.entries]);
+  }, [similarOverviewOpen, similarPairs, similarOverviewFilter, workspace.entries]);
   const similarAnchorEntry = similarAnchorEntryId ? workspace.entries[similarAnchorEntryId] ?? null : null;
+
+  // 右欄「相似」頁打開時，向背景線程查詢當前條目；原文有改動（version 變）時重查。
+  useEffect(() => {
+    const worker = similarityWorkerRef.current;
+    if (!worker || rightPaneTab !== "similar" || !similarAnchorEntryId) {
+      return;
+    }
+    similarAnchorRequestRef.current += 1;
+    const request: SimilarityWorkerRequest = {
+      type: "similar",
+      requestId: similarAnchorRequestRef.current,
+      anchorId: similarAnchorEntryId,
+      limit: 30,
+    };
+    worker.postMessage(request);
+  }, [rightPaneTab, similarAnchorEntryId, similarityVersion]);
+
   const similarMatches = useMemo((): { copies: SimilarMatch[]; similar: SimilarMatch[] } => {
-    if (!similarityIndex || !similarAnchorEntry) {
+    if (!similarAnchorEntry || similarAnchorResult?.anchorId !== similarAnchorEntry.id) {
       return { copies: [], similar: [] };
     }
     const copies: SimilarMatch[] = [];
     const similar: SimilarMatch[] = [];
-    for (const match of similarityIndex.findSimilar(similarAnchorEntry.id, 30)) {
-      if (workspace.entries[match.entryId]?.sourceText === similarAnchorEntry.sourceText) {
+    for (const match of similarAnchorResult.matches) {
+      if (!workspace.entries[match.entryId]) {
+        continue;
+      }
+      if (workspace.entries[match.entryId].sourceText === similarAnchorEntry.sourceText) {
         copies.push(match);
       } else {
         similar.push(match);
       }
     }
     return { copies, similar };
-  }, [similarityIndex, similarAnchorEntry, workspace.entries]);
+  }, [similarAnchorResult, similarAnchorEntry, workspace.entries]);
 
   const compareResult = useMemo(() => {
     if (!compareState) {
@@ -2529,13 +2483,13 @@ function App() {
       return null;
     }
     // 對齊段落沿用「相似文本」的片段長度與每段門檻，與列表中看到的段落一致。
+    // 比全文時同樣先對上這些段落（次序顛倒也照樣對上），其餘文字再按先後比較。
     return compareTexts(
       left.sourceText,
       right.sourceText,
       compareState.strict,
-      compareScope === "aligned"
-        ? { gramSize: similarGramSize, minBlockChars: similarMinBlock, maxGap: similarMaxGap, strict: similarStrict }
-        : null,
+      { gramSize: similarGramSize, minBlockChars: similarMinBlock, maxGap: similarMaxGap, strict: similarStrict },
+      compareScope === "full",
     );
   }, [compareState, compareScope, similarGramSize, similarMinBlock, similarMaxGap, similarStrict, workspace.entries]);
 
@@ -2545,6 +2499,13 @@ function App() {
       scrollCompareToBlock(0, "auto");
     }
   }, [compareResult]);
+
+  // 配色與卡片樣式掛在 <html> 上（各套配色的變量定義在 styles.css），彈窗也取用同一套顏色。
+  useLayoutEffect(() => {
+    const root = document.documentElement;
+    root.dataset.theme = appearance.theme;
+    root.dataset.cardStyle = appearance.cardStyle;
+  }, [appearance]);
 
   useEffect(() => {
     document.documentElement.style.setProperty("--reading-font-size", `${readingFontSize}px`);
@@ -2719,8 +2680,9 @@ function App() {
     }
   }
 
+  // 檢索線程只在用不了 SQLite 檢索時（瀏覽器版、或資料庫失效）才建立；桌面版平時不佔這份記憶體。
   useEffect(() => {
-    if (typeof Worker === "undefined") {
+    if (typeof Worker === "undefined" || nativeSearchAvailable) {
       searchWorkerRef.current = null;
       return;
     }
@@ -2764,7 +2726,7 @@ function App() {
       worker.terminate();
       searchWorkerRef.current = null;
     };
-  }, [startSearchTransition]);
+  }, [startSearchTransition, nativeSearchAvailable]);
 
   useEffect(() => {
     const worker = searchWorkerRef.current;
@@ -3114,7 +3076,8 @@ function App() {
     }
     return bridge.onCloseFlushRequest(async () => ({
       saved: await flushPendingWorkspaceSave(),
-      hasUnsavedDraft: hasUnsavedEntryDraft(modalStateRef.current),
+      hasUnsavedDraft:
+        hasUnsavedEntryDraft(modalStateRef.current) || entryViewsRef.current.some(hasUnsavedViewDraft),
     }));
   }, [sharedSyncReady]);
 
@@ -3236,10 +3199,16 @@ function App() {
           return;
         }
         // 只關閉最上層的彈窗。
-        const openKeys = OVERLAY_MODAL_KEYS.filter((key) => modalOpenStateRef.current[key]);
+        const openKeys = Object.keys(modalOpenStateRef.current).filter((key) => modalOpenStateRef.current[key]);
         if (openKeys.length > 0) {
           const orders = modalOrdersRef.current;
-          const topKey = openKeys.reduce((top, key) => (orders[key] >= orders[top] ? key : top));
+          const topKey = openKeys.reduce((top, key) => ((orders[key] ?? 0) >= (orders[top] ?? 0) ? key : top));
+          // 檢視窗不阻擋主界面：焦點在主界面時按 Esc 不關窗。
+          const focusInWindow =
+            document.activeElement instanceof Element && Boolean(document.activeElement.closest(".modal-card"));
+          if (topKey.startsWith("view:") && !focusInWindow) {
+            return;
+          }
           event.preventDefault();
           requestCloseOverlayModal(topKey);
         }
@@ -3252,7 +3221,7 @@ function App() {
         const isEditingEntry =
           modalState?.kind === "entry-create" ||
           modalState?.kind === "entry-edit" ||
-          (modalState?.kind === "entry-view" && modalState.editing);
+          entryViewsRef.current.some((win) => win.editing);
         if (isEditingEntry) {
           event.preventDefault();
           applyEntryEditor();
@@ -3533,7 +3502,7 @@ function App() {
     setWorkspace((previous) => {
       const next = structuredClone(previous);
       mutator(next);
-      return cleanupWorkspace(next);
+      return cleanupWorkspace(next, true);
     });
   }
 
@@ -3588,7 +3557,7 @@ function App() {
     setDropTargetKey(null);
   }
 
-  function activateOverlayModal(key: OverlayModalKey): void {
+  function activateOverlayModal(key: string): void {
     setModalOrders((previous) => {
       const highestOrder = Math.max(...Object.values(previous));
       if (previous[key] >= highestOrder) {
@@ -3603,13 +3572,13 @@ function App() {
     });
   }
 
-  function modalBackdropStyle(key: OverlayModalKey): CSSProperties {
+  function modalBackdropStyle(key: string): CSSProperties {
     return {
       zIndex: MODAL_BASE_Z_INDEX + modalOrders[key] * MODAL_Z_INDEX_STEP,
     };
   }
 
-  function startModalDrag(event: MouseEvent<HTMLElement>, key: OverlayModalKey): void {
+  function startModalDrag(event: MouseEvent<HTMLElement>, key: string): void {
     if (event.button !== 0) {
       return;
     }
@@ -3821,29 +3790,42 @@ function App() {
     setModalState({ kind: "chapter-rename", chapterId, value: chapter.title });
   }
 
+  // 同一時間只在一個窗口裏編輯；已有別條在編輯時，把那個窗口提到最前。
   function beginEditEntry(entryId: string, highlightQuery = ""): void {
     const entry = workspace.entries[entryId];
     if (!entry) {
       return;
     }
+    const editingWin = entryViewsRef.current.find((win) => win.editing);
+    if (editingWin && editingWin.entryId !== entryId) {
+      activateOverlayModal(entryViewKey(editingWin.winId));
+      return;
+    }
+    if (modalState?.kind === "entry-create" || modalState?.kind === "entry-edit") {
+      activateOverlayModal("entry-form");
+      return;
+    }
     const resolvedHighlight =
       highlightQuery.trim() ||
       (entryHighlightContext?.entryId === entryId ? entryHighlightContext.query : "");
-
     setSourceFormatState(EMPTY_SOURCE_FORMAT_STATE);
-    activateOverlayModal("entry-view");
-    setModalState({
-      kind: "entry-view",
-      entryId,
-      editing: true,
-      draft: entryToDraft(entry),
-      highlightQuery: resolvedHighlight,
-      // 從鏈接點進來後再編輯，保存或取消後仍可返回。
-      backStack:
-        modalState?.kind === "entry-view" && modalState.entryId === entryId ? modalState.backStack : undefined,
-    });
+    const existing = entryViewsRef.current.find((win) => win.entryId === entryId);
+    if (existing) {
+      setEntryViews((wins) =>
+        wins.map((win) =>
+          win.winId === existing.winId
+            ? { ...win, editing: true, draft: entryToDraft(entry), highlightQuery: resolvedHighlight }
+            : win,
+        ),
+      );
+      pendingViewFocusRef.current = entryViewKey(existing.winId);
+      activateOverlayModal(entryViewKey(existing.winId));
+      return;
+    }
+    openEntryViewWindow(entry, true, resolvedHighlight);
   }
 
+  // 檢視某條：已有它的窗口就提到最前，否則另開一個窗口。
   function beginViewEntry(entryId: string, highlightQuery = ""): void {
     const entry = workspace.entries[entryId];
     if (!entry) {
@@ -3852,14 +3834,105 @@ function App() {
     const resolvedHighlight =
       highlightQuery.trim() ||
       (entryHighlightContext?.entryId === entryId ? entryHighlightContext.query : "");
-    setSourceFormatState(EMPTY_SOURCE_FORMAT_STATE);
-    activateOverlayModal("entry-view");
-    setModalState({
-      kind: "entry-view",
-      entryId,
-      editing: false,
-      draft: entryToDraft(entry),
-      highlightQuery: resolvedHighlight,
+    const existing = entryViewsRef.current.find((win) => win.entryId === entryId);
+    if (existing) {
+      if (!existing.editing && resolvedHighlight && resolvedHighlight !== existing.highlightQuery) {
+        setEntryViews((wins) =>
+          wins.map((win) => (win.winId === existing.winId ? { ...win, highlightQuery: resolvedHighlight } : win)),
+        );
+      }
+      pendingViewFocusRef.current = entryViewKey(existing.winId);
+      activateOverlayModal(entryViewKey(existing.winId));
+      return;
+    }
+    openEntryViewWindow(entry, false, resolvedHighlight);
+  }
+
+  function openEntryViewWindow(entry: Entry, editing: boolean, highlightQuery: string): void {
+    const winId = createId("view");
+    const key = entryViewKey(winId);
+    // 新窗口在前一個的右下方錯開一點，不完全疊住。
+    const step = (entryViewsRef.current.length % 6) * 28;
+    setModalOffsets((offsets) => ({ ...offsets, [key]: { x: step, y: step } }));
+    setEntryViews((wins) => {
+      let next = [...wins, { winId, entryId: entry.id, editing, draft: entryToDraft(entry), highlightQuery }];
+      // 太多時關掉最早打開、未在編輯的窗口。
+      while (next.length > ENTRY_VIEW_WINDOW_LIMIT) {
+        const oldest = next.find((win) => !win.editing && win.winId !== winId);
+        if (!oldest) {
+          break;
+        }
+        next = next.filter((win) => win !== oldest);
+      }
+      return next;
+    });
+    pendingViewFocusRef.current = key;
+    activateOverlayModal(key);
+  }
+
+  function updateEntryViewDraft(winId: string, patch: Partial<EntryDraft>): void {
+    setEntryViews((wins) =>
+      wins.map((win) => (win.winId === winId ? { ...win, draft: { ...win.draft, ...patch } } : win)),
+    );
+  }
+
+  function applyEntryViewEditor(winId: string): void {
+    const win = entryViewsRef.current.find((item) => item.winId === winId);
+    if (!win?.editing) {
+      return;
+    }
+    const { entryId, draft } = win;
+    mutateWorkspace((workspaceDraft) => {
+      const entry = workspaceDraft.entries[entryId];
+      if (!entry) {
+        return;
+      }
+      entry.timeText = draft.timeText;
+      entry.summary = draft.summary;
+      entry.sourceText = draft.sourceText;
+      entry.note = draft.note;
+      entry.citation = draft.citation;
+      entry.updatedAt = Date.now();
+    });
+    setEntryViews((wins) => wins.map((item) => (item.winId === winId ? { ...item, editing: false, draft } : item)));
+  }
+
+  function cancelEntryViewEditing(winId: string): void {
+    setEntryViews((wins) =>
+      wins.map((win) => {
+        if (win.winId !== winId || !win.editing) {
+          return win;
+        }
+        const entry = workspace.entries[win.entryId];
+        return entry ? { ...win, editing: false, draft: entryToDraft(entry) } : win;
+      }),
+    );
+  }
+
+  function hasUnsavedViewDraft(win: EntryViewWindow): boolean {
+    if (!win.editing) {
+      return false;
+    }
+    const entry = workspaceRef.current.entries[win.entryId];
+    return Boolean(entry) && !entryDraftsEqual(win.draft, entryToDraft(entry));
+  }
+
+  function closeEntryViewWindow(winId: string): void {
+    const win = entryViewsRef.current.find((item) => item.winId === winId);
+    if (win && hasUnsavedViewDraft(win) && !window.confirm("這條史料尚未保存，確定放棄修改嗎？")) {
+      return;
+    }
+    const key = entryViewKey(winId);
+    setEntryViews((wins) => wins.filter((item) => item.winId !== winId));
+    setModalOffsets((offsets) => {
+      const next = { ...offsets };
+      delete next[key];
+      return next;
+    });
+    setModalOrders((orders) => {
+      const next = { ...orders };
+      delete next[key];
+      return next;
     });
   }
 
@@ -4223,8 +4296,7 @@ function App() {
     if (
       !modalState ||
       modalState.kind === "entry-edit" ||
-      modalState.kind === "entry-create" ||
-      modalState.kind === "entry-view"
+      modalState.kind === "entry-create"
     ) {
       return;
     }
@@ -4323,34 +4395,11 @@ function App() {
   }
 
   function applyEntryEditor(): void {
-    if (!modalState) {
-      return;
-    }
-
-    if (modalState.kind === "entry-view" && modalState.editing) {
-      const { entryId, draft } = modalState;
-      mutateWorkspace((workspaceDraft) => {
-        const entry = workspaceDraft.entries[entryId];
-        if (!entry) {
-          return;
-        }
-        entry.timeText = draft.timeText;
-        entry.summary = draft.summary;
-        entry.sourceText = draft.sourceText;
-        entry.note = draft.note;
-        entry.citation = draft.citation;
-        entry.updatedAt = Date.now();
-      });
-      setModalState((current) => {
-        if (!current || current.kind !== "entry-view" || current.entryId !== entryId) {
-          return current;
-        }
-        return {
-          ...current,
-          editing: false,
-          draft,
-        };
-      });
+    if (modalState?.kind !== "entry-edit" && modalState?.kind !== "entry-create") {
+      const editingWin = entryViewsRef.current.find((win) => win.editing);
+      if (editingWin) {
+        applyEntryViewEditor(editingWin.winId);
+      }
       return;
     }
 
@@ -4405,23 +4454,6 @@ function App() {
       });
       setModalState(null);
     }
-  }
-
-  function cancelEntryViewEditing(): void {
-    setModalState((current) => {
-      if (!current || current.kind !== "entry-view" || !current.editing) {
-        return current;
-      }
-      const entry = workspace.entries[current.entryId];
-      if (!entry) {
-        return null;
-      }
-      return {
-        ...current,
-        editing: false,
-        draft: entryToDraft(entry),
-      };
-    });
   }
 
   function deleteProject(projectId: string): void {
@@ -4620,13 +4652,16 @@ function App() {
   }
 
   function updateEntryModalDraft(patch: Partial<EntryDraft>): void {
+    // 新增、編輯表單優先；沒有表單時改的是正在編輯的檢視窗（格式工具列也走這裏）。
+    if (modalState?.kind !== "entry-edit" && modalState?.kind !== "entry-create") {
+      const editingWin = entryViewsRef.current.find((win) => win.editing);
+      if (editingWin) {
+        updateEntryViewDraft(editingWin.winId, patch);
+      }
+      return;
+    }
     setModalState((current) => {
-      if (
-        !current ||
-        (current.kind !== "entry-edit" &&
-          current.kind !== "entry-create" &&
-          (current.kind !== "entry-view" || !current.editing))
-      ) {
+      if (!current || (current.kind !== "entry-edit" && current.kind !== "entry-create")) {
         return current;
       }
       return {
@@ -4782,14 +4817,9 @@ function App() {
     });
     setStorageStatus(`已將史料「${formatEntryHeadline(entry.timeText, entry.summary)}」移至回收站。`);
 
+    setEntryViews((wins) => wins.filter((win) => win.entryId !== entryId));
     setModalState((current) => {
-      if (!current) {
-        return current;
-      }
-      if (current.kind === "entry-view" && current.entryId === entryId) {
-        return null;
-      }
-      if (current.kind === "entry-edit" && current.entryId === entryId) {
+      if (current?.kind === "entry-edit" && current.entryId === entryId) {
         return null;
       }
       return current;
@@ -4858,14 +4888,12 @@ function App() {
       if (!current) {
         return current;
       }
-      if (
-        (current.kind === "entry-view" || current.kind === "entry-edit") &&
-        uniqueEntryIds.includes(current.entryId)
-      ) {
+      if (current.kind === "entry-edit" && uniqueEntryIds.includes(current.entryId)) {
         return null;
       }
       return current;
     });
+    setEntryViews((wins) => wins.filter((win) => !uniqueEntryIds.includes(win.entryId)));
   }
 
   function trashRestoreBlockReason(item: TrashItem): string | null {
@@ -5552,14 +5580,21 @@ function App() {
     if (state.kind === "entry-create") {
       return !entryDraftsEqual(state.draft, createEmptyEntryDraft());
     }
-    if ((state.kind === "entry-view" && state.editing) || state.kind === "entry-edit") {
+    if (state.kind === "entry-edit") {
       const entry = workspaceRef.current.entries[state.entryId];
       return Boolean(entry) && !entryDraftsEqual(state.draft, entryToDraft(entry));
     }
     return false;
   }
 
-  function requestCloseOverlayModal(key: OverlayModalKey): void {
+  function requestCloseOverlayModal(key: string): void {
+    if (storageBusy && (key === "storage" || key === "storage-save-as")) {
+      return;
+    }
+    if (key.startsWith("view:")) {
+      closeEntryViewWindow(key.slice("view:".length));
+      return;
+    }
     switch (key) {
       case "storage":
         closeStorageModal();
@@ -5590,11 +5625,6 @@ function App() {
         return;
       default:
         if (hasUnsavedEntryDraft(modalState) && !window.confirm("這條史料尚未保存，確定放棄修改嗎？")) {
-          return;
-        }
-        // 經由鏈接點過來的檢視窗：Esc 先返回上一條。
-        if (modalState?.kind === "entry-view" && !modalState.editing && modalState.backStack?.length) {
-          goBackInEntryView();
           return;
         }
         setModalState(null);
@@ -5993,16 +6023,6 @@ function App() {
     modalState && (modalState.kind === "entry-edit" || modalState.kind === "entry-create")
       ? modalState
       : null;
-  const entryViewModal = modalState?.kind === "entry-view" ? modalState : null;
-  const viewedEntry = entryViewModal ? workspace.entries[entryViewModal.entryId] ?? null : null;
-  const viewedEntryDraft = entryViewModal ? entryViewModal.draft : null;
-  const viewedEntrySimilar = viewedEntry ? similarSummary.get(viewedEntry.id) ?? [] : [];
-  const viewedEntryBacklinks = viewedEntry
-    ? (backlinksByRefId.get(viewedEntry.refId) ?? [])
-        .map((entryId) => workspace.entries[entryId])
-        .filter((entry): entry is Entry => Boolean(entry))
-    : [];
-  const entryViewHighlightQuery = entryViewModal?.highlightQuery?.trim() ?? "";
   const compareView = (() => {
     if (!compareState || !compareResult) {
       return null;
@@ -6030,7 +6050,7 @@ function App() {
         rightSegment,
       };
     });
-    // marks 標的是此側獨有的字；標相同時取反，即兩側共有的字（對齊段落以外的不算）。
+    // marks 標的是此側獨有的字；標相同時取反，即兩側共有的字（只比段落時，段落以外的不算）。
     const blocks = compareResult.blocks?.length ? compareResult.blocks : null;
     const side = (
       entry: Entry,
@@ -6053,7 +6073,7 @@ function App() {
         sourceLabel: shortSourceLabel(entry),
         html: applyLightMarkup(
           sideBlocks
-            ? renderAlignedText(entry.sourceText, comparable, ranges, sideBlocks, className)
+            ? renderAlignedText(entry.sourceText, comparable, ranges, sideBlocks, className, Boolean(outside))
             : wrapTextRanges(entry.sourceText, ranges, className),
         ),
       };
@@ -6087,13 +6107,407 @@ function App() {
       ],
     };
   })();
-  const modalOpenState: Record<OverlayModalKey, boolean> = {
+  // 所有窗口共用的右上角關閉按鈕：與 Esc 走同一個關閉流程（含未保存提示、忙碌時不可關）。
+  function renderModalClose(key: string) {
+    const busy = storageBusy && (key === "storage" || key === "storage-save-as");
+    return (
+      <button
+        type="button"
+        className="modal-close-btn"
+        aria-label="關閉"
+        title={busy ? "處理中，請稍候" : "關閉（Esc）"}
+        disabled={busy}
+        onClick={() => requestCloseOverlayModal(key)}
+      >
+        <svg viewBox="0 0 16 16" aria-hidden="true">
+          <path d="M4 4l8 8M12 4l-8 8" />
+        </svg>
+      </button>
+    );
+  }
+
+  // 一個「檢視史料」窗口（可同時打開多個）。
+  function renderEntryViewWindow(win: EntryViewWindow) {
+    const viewedEntry = workspace.entries[win.entryId];
+    if (!viewedEntry) {
+      return null;
+    }
+    const key = entryViewKey(win.winId);
+    const entryViewModal = win;
+    const viewedEntryDraft = win.draft;
+    const entryViewHighlightQuery = win.highlightQuery.trim();
+    const viewedEntrySimilar = similarSummary.get(viewedEntry.id) ?? [];
+    const viewedEntryBacklinks = (backlinksByRefId.get(viewedEntry.refId) ?? [])
+      .map((entryId) => workspace.entries[entryId])
+      .filter((entry): entry is Entry => Boolean(entry));
+    return (
+        <div key={key} className="modal-backdrop" style={modalBackdropStyle(key)}>
+          <div
+            className="modal-card modal-large entry-view-modal draggable-modal"
+            style={modalCardStyle(key)}
+            data-view-key={key}
+            tabIndex={-1}
+            onMouseDown={(event) => {
+              activateOverlayModal(key);
+              event.stopPropagation();
+            }}
+          >
+            {renderModalClose(key)}
+            <div
+              className="modal-head entry-view-head modal-drag-handle"
+              onMouseDown={(event) => startModalDrag(event, key)}
+            >
+              <div className="entry-view-head-main">
+                <div className="entry-view-title-row">
+                  <h3>{entryViewModal.editing ? "編輯史料" : "檢視史料"}</h3>
+                  {!entryViewModal.editing &&
+                    renderSimilarBadge(
+                      viewedEntry.id,
+                      () =>
+                        document
+                          .getElementById(`${key}-similar`)
+                          ?.scrollIntoView({ behavior: "smooth", block: "nearest" }),
+                      "點擊跳到下方列表。",
+                    )}
+                  {!entryViewModal.editing && viewedEntryBacklinks.length > 0 && (
+                    <button
+                      type="button"
+                      className="similar-badge backlink-badge"
+                      title={`有 ${viewedEntryBacklinks.length} 條在備註中鏈接到這一條。點擊跳到下方列表。`}
+                      onClick={() =>
+                        document
+                          .getElementById(`${key}-backlinks`)
+                          ?.scrollIntoView({ behavior: "smooth", block: "nearest" })
+                      }
+                    >
+                      <span dangerouslySetInnerHTML={{ __html: ENTRY_REF_ICON }} />
+                      <span>反向鏈接</span>
+                      <strong>{viewedEntryBacklinks.length}</strong>
+                    </button>
+                  )}
+                </div>
+                <p className="meta-text">
+                  {workspace.projects[viewedEntry.projectId]?.title || "未命名專案"} /{" "}
+                  {workspace.chapters[viewedEntry.chapterId]?.title || "未命名章節"}
+                </p>
+              </div>
+            </div>
+
+            <div className="modal-grid entry-view-grid">
+              <section className="entry-view-block">
+                <div className="entry-view-title">時間</div>
+                {entryViewModal.editing ? (
+                  <input
+                    autoFocus
+                    value={viewedEntryDraft?.timeText ?? ""}
+                    onChange={(event) => updateEntryViewDraft(win.winId, { timeText: event.target.value })}
+                    placeholder="如：萬曆二十年春 / 1644年 / 未詳"
+                  />
+                ) : (
+                  <div
+                    className="entry-view-text"
+                    dangerouslySetInnerHTML={{
+                      __html: renderHighlightedPlainText(
+                        viewedEntryDraft?.timeText.trim() || "未著錄時間",
+                        entryViewHighlightQuery,
+                      ),
+                    }}
+                  />
+                )}
+              </section>
+
+              <section className="entry-view-block">
+                <div className="entry-view-title">摘要</div>
+                {entryViewModal.editing ? (
+                  <input
+                    value={viewedEntryDraft?.summary ?? ""}
+                    onChange={(event) => updateEntryViewDraft(win.winId, { summary: event.target.value })}
+                    placeholder="例如：張居正改革前夕的朝議分歧"
+                  />
+                ) : (
+                  <div
+                    className="entry-view-text"
+                    dangerouslySetInnerHTML={{
+                      __html: renderHighlightedPlainText(
+                        viewedEntryDraft?.summary.trim() || "（無摘要）",
+                        entryViewHighlightQuery,
+                      ),
+                    }}
+                  />
+                )}
+              </section>
+
+              <section className="entry-view-block">
+                <div className="entry-view-title">史料文本</div>
+                {entryViewModal.editing ? (
+                  <>
+                    <div className="format-toolbar">
+                      <button
+                        type="button"
+                        className="icon-btn format-btn"
+                        aria-label="加粗"
+                        aria-pressed={sourceFormatState.bold}
+                        title="粗體（⌘B）"
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => applySourceMarker("bold")}
+                      >
+                        B
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-btn format-btn"
+                        aria-label="斜體"
+                        aria-pressed={sourceFormatState.italic}
+                        title="斜體（⌘I）"
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => applySourceMarker("italic")}
+                      >
+                        I
+                      </button>
+                      <button
+                        type="button"
+                        className="icon-btn format-btn"
+                        aria-label="下劃線"
+                        aria-pressed={sourceFormatState.underline}
+                        title="下劃線（⌘U）"
+                        onMouseDown={(event) => event.preventDefault()}
+                        onClick={() => applySourceMarker("underline")}
+                      >
+                        U
+                      </button>
+                      <span className="format-tip">語法：`**粗體**` `*斜體*` `__下劃線__`</span>
+                    </div>
+                    <textarea
+                      ref={entrySourceTextareaRef}
+                      rows={8}
+                      value={viewedEntryDraft?.sourceText ?? ""}
+                      onChange={(event) => updateEntryViewDraft(win.winId, { sourceText: event.target.value })}
+                      onClick={syncSourceFormatState}
+                      onKeyDown={handleSourceShortcut}
+                      onKeyUp={syncSourceFormatState}
+                      onSelect={syncSourceFormatState}
+                      placeholder="輸入原始史料文本..."
+                    />
+                  </>
+                ) : viewedEntryDraft?.sourceText.trim() ? (
+                  <div
+                    className="entry-view-source rich-markup"
+                    dangerouslySetInnerHTML={{
+                      __html: renderHighlightedLightMarkup(
+                        viewedEntryDraft.sourceText.trim(),
+                        entryViewHighlightQuery,
+                      ),
+                    }}
+                  />
+                ) : (
+                  <div className="entry-view-text">（尚未輸入史料文本）</div>
+                )}
+              </section>
+
+              <section className="entry-view-block">
+                <div className="entry-view-title">備註</div>
+                {entryViewModal.editing ? (
+                  <textarea
+                    rows={5}
+                    value={viewedEntryDraft?.note ?? ""}
+                    onChange={(event) => updateEntryViewDraft(win.winId, { note: event.target.value })}
+                    placeholder="例如：#政治 #人物關係 #萬曆朝 ..."
+                  />
+                ) : (
+                  <div
+                    className="entry-view-note"
+                    onClick={handleEntryRefClick}
+                    dangerouslySetInnerHTML={{
+                      __html: renderNoteWithRefs(viewedEntryDraft?.note.trim() || "（無備註）", entryViewHighlightQuery),
+                    }}
+                  />
+                )}
+              </section>
+
+              <section className="entry-view-block">
+                <div className="entry-view-title">引文註釋</div>
+                {entryViewModal.editing ? (
+                  <textarea
+                    rows={5}
+                    value={viewedEntryDraft?.citation ?? ""}
+                    onChange={(event) => updateEntryViewDraft(win.winId, { citation: event.target.value })}
+                    placeholder="如：某某書卷X，某某頁；可含《書名》供後續聚合"
+                  />
+                ) : (
+                  <div
+                    className="entry-view-citation"
+                    dangerouslySetInnerHTML={{
+                      __html: renderHighlightedPlainText(
+                        viewedEntryDraft?.citation.trim() || "（無引文註釋）",
+                        entryViewHighlightQuery,
+                      ),
+                    }}
+                  />
+                )}
+              </section>
+
+              {!entryViewModal.editing && viewedEntryBacklinks.length > 0 && (
+                <section className="entry-view-block entry-similar-block" id={`${key}-backlinks`}>
+                  <div className="entry-view-title entry-similar-head">
+                    <span className="entry-ref-head-icon" dangerouslySetInnerHTML={{ __html: ENTRY_REF_ICON }} />
+                    反向鏈接
+                    <span className="section-count">{viewedEntryBacklinks.length}</span>
+                    <span className="section-hint">這些條目在備註中鏈接到本條，點擊檢視</span>
+                  </div>
+                  <ul className="entry-similar-list backlink-list">
+                    {viewedEntryBacklinks.map((entry) => (
+                      <li
+                        key={entry.id}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => openEntryRef(entry.refId)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            openEntryRef(entry.refId);
+                          }
+                        }}
+                      >
+                        <div className="entry-similar-main">
+                          <span className="entry-similar-title">
+                            {formatEntryHeadline(entry.timeText, entry.summary ?? "")}
+                          </span>
+                          <span className="search-path">
+                            {workspace.projects[entry.projectId]?.title ?? "未命名專案"} /{" "}
+                            {workspace.chapters[entry.chapterId]?.title ?? "未命名章節"}
+                          </span>
+                          <span
+                            className="backlink-context"
+                            dangerouslySetInnerHTML={{
+                              __html: renderNoteWithRefs(excerptAroundRef(entry.note, viewedEntry.refId), ""),
+                            }}
+                          />
+                        </div>
+                        <span className="backlink-go">檢視 ›</span>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+
+              {!entryViewModal.editing && viewedEntrySimilar.length > 0 && (
+                <section className="entry-view-block entry-similar-block" id={`${key}-similar`}>
+                  <div className="entry-view-title entry-similar-head">
+                    {SIMILAR_ICON}
+                    相似文本
+                    <span className="section-count">{viewedEntrySimilar.length}</span>
+                    <span className="section-hint">點「比勘」或雙擊一行，逐字對照</span>
+                  </div>
+                  <ul className="entry-similar-list">
+                    {viewedEntrySimilar.slice(0, 6).map((item) => {
+                      const other = workspace.entries[item.entryId];
+                      if (!other) {
+                        return null;
+                      }
+                      return (
+                        <li
+                          key={item.entryId}
+                          onDoubleClick={() => openCompare(viewedEntry.id, item.entryId)}
+                          onMouseDown={(event) => {
+                            if (event.detail > 1) {
+                              event.preventDefault();
+                            }
+                          }}
+                        >
+                          <span
+                            className="similar-ring"
+                            style={{ "--score": String(item.copy ? 1 : item.score) } as CSSProperties}
+                            title={item.copy ? "原文完全相同" : `相似度 ${formatPercent(item.score)}`}
+                          >
+                            <span>{item.copy ? "同" : Math.round(item.score * 100)}</span>
+                          </span>
+                          <div className="entry-similar-main">
+                            <span className="entry-similar-title">
+                              {formatEntryHeadline(other.timeText, other.summary ?? "")}
+                            </span>
+                            <span className="search-path">
+                              {workspace.projects[other.projectId]?.title ?? "未命名專案"} /{" "}
+                              {workspace.chapters[other.chapterId]?.title ?? "未命名章節"} · 相同 {item.sharedChars}{" "}
+                              字 · 一致 {formatPercent(item.identity)}
+                            </span>
+                          </div>
+                          <button
+                            className="mini-btn mini-btn-accent"
+                            onClick={() => openCompare(viewedEntry.id, item.entryId)}
+                          >
+                            比勘
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                  {viewedEntrySimilar.length > 6 && (
+                    <button
+                      className="text-link"
+                      onClick={() => showSimilarFor(viewedEntry.id)}
+                    >
+                      在右欄查看全部 {viewedEntrySimilar.length} 條 ›
+                    </button>
+                  )}
+                </section>
+              )}
+            </div>
+
+            <div className="entry-view-footer">
+              <div className="entry-view-meta">
+                <button
+                  type="button"
+                  className={copiedRefKey === key ? "entry-id-chip is-copied" : "entry-id-chip"}
+                  title={`複製 [[${viewedEntry.refId}]]，貼到其他條目的備註中即可鏈接到這一條`}
+                  onClick={() => void copyEntryRefs([viewedEntry.id], key)}
+                >
+                  <span className="entry-id-chip-icon" dangerouslySetInnerHTML={{ __html: ENTRY_REF_ICON }} />
+                  <span className="entry-id-chip-id">{viewedEntry.refId}</span>
+                  <span className="entry-id-chip-action">{copiedRefKey === key ? "已複製" : "複製鏈接"}</span>
+                </button>
+                <p className="meta-text entry-view-time-meta">
+                  建立 {formatDateTimeLabel(viewedEntry.createdAt)} · 修改 {formatDateTimeLabel(viewedEntry.updatedAt)}
+                </p>
+              </div>
+              <div className="entry-view-footer-actions">
+                {entryViewModal.editing ? (
+                  <>
+                    <button className="ghost-btn" onClick={() => cancelEntryViewEditing(win.winId)}>
+                      取消編輯
+                    </button>
+                    <button
+                      className="secondary-btn"
+                      onClick={() => applyEntryViewEditor(win.winId)}
+                      title="保存（⌘↵）"
+                    >
+                      保存修改
+                    </button>
+                  </>
+                ) : (
+                  <>
+                    <button className="ghost-btn danger-btn" onClick={() => deleteEntry(viewedEntry.id)}>
+                      刪除
+                    </button>
+                    <button
+                      className="secondary-btn"
+                      onClick={() => beginEditEntry(viewedEntry.id, entryViewHighlightQuery)}
+                    >
+                      編輯
+                    </button>
+                  </>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+    );
+  }
+
+  const modalOpenState: Record<string, boolean> = {
     storage: storageModalOpen,
     trash: trashModalOpen,
     "storage-save-as": storageSaveAsModalOpen,
     "storage-format-info": storageFormatInfoModalOpen,
     form: Boolean(formModal),
-    "entry-view": Boolean(entryViewModal),
     "entry-form": Boolean(entryModal),
     advanced: advancedModal.open,
     "merge-project": mergeModal.open,
@@ -6101,15 +6515,22 @@ function App() {
     compare: Boolean(compareState && compareResult),
     "similar-overview": similarOverviewOpen,
   };
+  // 檢視窗也算打開的窗口（Esc、層疊次序），但不鎖住主界面：只有固定彈窗才讓主界面 inert。
+  for (const win of entryViews) {
+    modalOpenState[entryViewKey(win.winId)] = true;
+  }
   const anyOverlayModalOpen = OVERLAY_MODAL_KEYS.some((key) => modalOpenState[key]);
-  const openModalSignature = OVERLAY_MODAL_KEYS.filter((key) => modalOpenState[key]).join("|");
+  const openModalSignature = Object.keys(modalOpenState)
+    .filter((key) => modalOpenState[key])
+    .join("|");
+  const openViewSignature = entryViews.map((win) => win.winId).join("|");
   const showGlobalStorageAlert = Boolean(
     storageStatus && /失敗|衝突|外部|未儲存|拒絕|覆蓋/.test(storageStatus),
   );
 
   useEffect(() => {
     const previous = modalOpenStateRef.current;
-    const openedKeys = OVERLAY_MODAL_KEYS.filter((key) => modalOpenState[key] && !previous[key]);
+    const openedKeys = Object.keys(modalOpenState).filter((key) => modalOpenState[key] && !previous[key]);
     modalOpenStateRef.current = { ...modalOpenState };
     if (openedKeys.length === 0) {
       return;
@@ -6126,7 +6547,7 @@ function App() {
     advancedModal.open,
     chapterMergeModal.open,
     Boolean(entryModal),
-    Boolean(entryViewModal),
+    openViewSignature,
     Boolean(formModal),
     mergeModal.open,
     storageFormatInfoModalOpen,
@@ -6136,6 +6557,19 @@ function App() {
     modalOpenState.compare,
     similarOverviewOpen,
   ]);
+
+  // 新開或提到最前的檢視窗：把焦點移進去，Esc 才會關到它。
+  useEffect(() => {
+    const key = pendingViewFocusRef.current;
+    if (!key) {
+      return;
+    }
+    pendingViewFocusRef.current = null;
+    const card = document.querySelector<HTMLElement>(`[data-view-key="${key}"]`);
+    if (card && !(document.activeElement instanceof Node && card.contains(document.activeElement))) {
+      card.focus();
+    }
+  }, [entryViews, modalOrders]);
 
   useEffect(() => {
     const appShell = document.querySelector<HTMLElement>(".app-shell");
@@ -6216,7 +6650,6 @@ function App() {
         className="app-shell"
         data-theme={appearance.theme}
         data-card-style={appearance.cardStyle}
-        style={appShellStyle}
       >
         <div className="ambient ambient-a" />
         <div className="ambient ambient-b" />
@@ -6909,6 +7342,9 @@ function App() {
                       </span>
                       <span className="section-hint">單擊定位 · 雙擊比勘</span>
                     </p>
+                  ) : similarAnchorResult?.anchorId !== similarAnchorEntry.id ? (
+                    // 背景線程還沒回覆這一條的結果：先不說「沒有」，免得一閃而過。
+                    <p className="empty-inline">比對中…</p>
                   ) : (
                     <p className="empty-inline">沒有找到明顯相似的文本。可點選上方的規則標籤放寬條件。</p>
                   )}
@@ -7448,6 +7884,7 @@ function App() {
               event.stopPropagation();
             }}
           >
+            {renderModalClose("trash")}
             <div className="modal-head modal-drag-handle" onMouseDown={(event) => startModalDrag(event, "trash")}>
               <div className="trash-modal-title-row">
                 <div>
@@ -7512,9 +7949,6 @@ function App() {
             </div>
 
             <div className="modal-actions trash-modal-actions">
-              <button className="ghost-btn" onClick={() => setTrashModalOpen(false)}>
-                關閉
-              </button>
               <button
                 className="ghost-btn danger-btn"
                 disabled={workspace.trash.length === 0}
@@ -7537,6 +7971,7 @@ function App() {
               event.stopPropagation();
             }}
           >
+            {renderModalClose("storage")}
             <div className="modal-head modal-drag-handle" onMouseDown={(event) => startModalDrag(event, "storage")}>
               <div className="storage-head-row">
                 <h3>檔案資料管理</h3>
@@ -7590,9 +8025,6 @@ function App() {
             </div>
 
             <div className="modal-actions storage-actions">
-              <button className="ghost-btn" onClick={closeStorageModal} disabled={storageBusy}>
-                關閉
-              </button>
               <button
                 className="ghost-btn"
                 onClick={() => {
@@ -7638,6 +8070,7 @@ function App() {
               event.stopPropagation();
             }}
           >
+            {renderModalClose("storage-save-as")}
             <div
               className="modal-head modal-drag-handle"
               onMouseDown={(event) => startModalDrag(event, "storage-save-as")}
@@ -7665,15 +8098,6 @@ function App() {
 
             {!activeProject && <p className="meta-text">目前沒有可用的當前專案。</p>}
 
-            <div className="modal-actions">
-              <button
-                className="ghost-btn"
-                onClick={() => setStorageSaveAsModalOpen(false)}
-                disabled={storageBusy}
-              >
-                取消
-              </button>
-            </div>
           </div>
         </div>
       )}
@@ -7688,6 +8112,7 @@ function App() {
               event.stopPropagation();
             }}
           >
+            {renderModalClose("storage-format-info")}
             <div
               className="modal-head modal-drag-handle"
               onMouseDown={(event) => startModalDrag(event, "storage-format-info")}
@@ -7713,11 +8138,6 @@ function App() {
               <p className="meta-text">建議副檔名使用 `.json`，方便備份與版本管理。</p>
             </div>
 
-            <div className="modal-actions">
-              <button className="ghost-btn" onClick={() => setStorageFormatInfoModalOpen(false)}>
-                關閉
-              </button>
-            </div>
           </div>
         </div>
       )}
@@ -7732,6 +8152,7 @@ function App() {
               event.stopPropagation();
             }}
           >
+            {renderModalClose("form")}
             <div className="modal-head modal-drag-handle" onMouseDown={(event) => startModalDrag(event, "form")}>
               <h3>
                 {formModal.kind === "project-create" && "新增專案"}
@@ -7749,12 +8170,7 @@ function App() {
                 onChange={(event) => {
                   const value = event.target.value;
                   setModalState((current) => {
-                    if (
-                      !current ||
-                      current.kind === "entry-view" ||
-                      current.kind === "entry-edit" ||
-                      current.kind === "entry-create"
-                    ) {
+                    if (!current || current.kind === "entry-edit" || current.kind === "entry-create") {
                       return current;
                     }
                     return { ...current, value };
@@ -7769,7 +8185,7 @@ function App() {
             </label>
 
             <div className="modal-actions">
-              <button className="ghost-btn" onClick={() => setModalState(null)}>
+              <button className="ghost-btn" onClick={() => requestCloseOverlayModal("form")}>
                 取消
               </button>
               <button className="secondary-btn" onClick={applyFormModal}>
@@ -7780,377 +8196,7 @@ function App() {
         </div>
       )}
 
-      {entryViewModal && viewedEntry && (
-        <div className="modal-backdrop" style={modalBackdropStyle("entry-view")}>
-          <div
-            className="modal-card modal-large entry-view-modal draggable-modal"
-            style={modalCardStyle("entry-view")}
-            onMouseDown={(event) => {
-              activateOverlayModal("entry-view");
-              event.stopPropagation();
-            }}
-          >
-            <div
-              className="modal-head entry-view-head modal-drag-handle"
-              onMouseDown={(event) => startModalDrag(event, "entry-view")}
-            >
-              <div className="entry-view-head-main">
-                <div className="entry-view-title-row">
-                  <h3>{entryViewModal.editing ? "檢視 / 編輯史料" : "檢視史料"}</h3>
-                  {!entryViewModal.editing &&
-                    renderSimilarBadge(
-                      viewedEntry.id,
-                      () =>
-                        document
-                          .getElementById("entry-view-similar")
-                          ?.scrollIntoView({ behavior: "smooth", block: "nearest" }),
-                      "點擊跳到下方列表。",
-                    )}
-                  {!entryViewModal.editing && viewedEntryBacklinks.length > 0 && (
-                    <button
-                      type="button"
-                      className="similar-badge backlink-badge"
-                      title={`有 ${viewedEntryBacklinks.length} 條在備註中鏈接到這一條。點擊跳到下方列表。`}
-                      onClick={() =>
-                        document
-                          .getElementById("entry-view-backlinks")
-                          ?.scrollIntoView({ behavior: "smooth", block: "nearest" })
-                      }
-                    >
-                      <span dangerouslySetInnerHTML={{ __html: ENTRY_REF_ICON }} />
-                      <span>反向鏈接</span>
-                      <strong>{viewedEntryBacklinks.length}</strong>
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    className="mini-btn copy-ref-btn"
-                    title={`複製 [[${viewedEntry.refId}]]，貼到其他條目的備註中即可鏈接到這一條`}
-                    onClick={() => void copyEntryRefs([viewedEntry.id], "view")}
-                  >
-                    {copiedRefKey === "view" ? "已複製" : "複製鏈接"}
-                  </button>
-                </div>
-                <p className="meta-text">
-                  {workspace.projects[viewedEntry.projectId]?.title || "未命名專案"} /{" "}
-                  {workspace.chapters[viewedEntry.chapterId]?.title || "未命名章節"}
-                </p>
-              </div>
-              <button className="ghost-btn danger-btn" onClick={() => deleteEntry(viewedEntry.id)}>
-                刪除
-              </button>
-            </div>
-
-            <div className="modal-grid entry-view-grid">
-              <section className="entry-view-block">
-                <div className="entry-view-title">時間</div>
-                {entryViewModal.editing ? (
-                  <input
-                    autoFocus
-                    value={viewedEntryDraft?.timeText ?? ""}
-                    onChange={(event) => updateEntryModalDraft({ timeText: event.target.value })}
-                    placeholder="如：萬曆二十年春 / 1644年 / 未詳"
-                  />
-                ) : (
-                  <div
-                    className="entry-view-text"
-                    dangerouslySetInnerHTML={{
-                      __html: renderHighlightedPlainText(
-                        viewedEntryDraft?.timeText.trim() || "未著錄時間",
-                        entryViewHighlightQuery,
-                      ),
-                    }}
-                  />
-                )}
-              </section>
-
-              <section className="entry-view-block">
-                <div className="entry-view-title">摘要</div>
-                {entryViewModal.editing ? (
-                  <input
-                    value={viewedEntryDraft?.summary ?? ""}
-                    onChange={(event) => updateEntryModalDraft({ summary: event.target.value })}
-                    placeholder="例如：張居正改革前夕的朝議分歧"
-                  />
-                ) : (
-                  <div
-                    className="entry-view-text"
-                    dangerouslySetInnerHTML={{
-                      __html: renderHighlightedPlainText(
-                        viewedEntryDraft?.summary.trim() || "（無摘要）",
-                        entryViewHighlightQuery,
-                      ),
-                    }}
-                  />
-                )}
-              </section>
-
-              <section className="entry-view-block">
-                <div className="entry-view-title">史料文本</div>
-                {entryViewModal.editing ? (
-                  <>
-                    <div className="format-toolbar">
-                      <button
-                        type="button"
-                        className="icon-btn format-btn"
-                        aria-label="加粗"
-                        aria-pressed={sourceFormatState.bold}
-                        title="粗體（⌘B）"
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => applySourceMarker("bold")}
-                      >
-                        B
-                      </button>
-                      <button
-                        type="button"
-                        className="icon-btn format-btn"
-                        aria-label="斜體"
-                        aria-pressed={sourceFormatState.italic}
-                        title="斜體（⌘I）"
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => applySourceMarker("italic")}
-                      >
-                        I
-                      </button>
-                      <button
-                        type="button"
-                        className="icon-btn format-btn"
-                        aria-label="下劃線"
-                        aria-pressed={sourceFormatState.underline}
-                        title="下劃線（⌘U）"
-                        onMouseDown={(event) => event.preventDefault()}
-                        onClick={() => applySourceMarker("underline")}
-                      >
-                        U
-                      </button>
-                      <span className="format-tip">語法：`**粗體**` `*斜體*` `__下劃線__`</span>
-                    </div>
-                    <textarea
-                      ref={entrySourceTextareaRef}
-                      rows={8}
-                      value={viewedEntryDraft?.sourceText ?? ""}
-                      onChange={(event) => updateEntryModalDraft({ sourceText: event.target.value })}
-                      onClick={syncSourceFormatState}
-                      onKeyDown={handleSourceShortcut}
-                      onKeyUp={syncSourceFormatState}
-                      onSelect={syncSourceFormatState}
-                      placeholder="輸入原始史料文本..."
-                    />
-                  </>
-                ) : viewedEntryDraft?.sourceText.trim() ? (
-                  <div
-                    className="entry-view-source rich-markup"
-                    dangerouslySetInnerHTML={{
-                      __html: renderHighlightedLightMarkup(
-                        viewedEntryDraft.sourceText.trim(),
-                        entryViewHighlightQuery,
-                      ),
-                    }}
-                  />
-                ) : (
-                  <div className="entry-view-text">（尚未輸入史料文本）</div>
-                )}
-              </section>
-
-              <section className="entry-view-block">
-                <div className="entry-view-title">備註</div>
-                {entryViewModal.editing ? (
-                  <textarea
-                    rows={5}
-                    value={viewedEntryDraft?.note ?? ""}
-                    onChange={(event) => updateEntryModalDraft({ note: event.target.value })}
-                    placeholder="例如：#政治 #人物關係 #萬曆朝 ..."
-                  />
-                ) : (
-                  <div
-                    className="entry-view-note"
-                    onClick={handleEntryRefClick}
-                    dangerouslySetInnerHTML={{
-                      __html: renderNoteWithRefs(viewedEntryDraft?.note.trim() || "（無備註）", entryViewHighlightQuery),
-                    }}
-                  />
-                )}
-              </section>
-
-              <section className="entry-view-block">
-                <div className="entry-view-title">引文註釋</div>
-                {entryViewModal.editing ? (
-                  <textarea
-                    rows={5}
-                    value={viewedEntryDraft?.citation ?? ""}
-                    onChange={(event) => updateEntryModalDraft({ citation: event.target.value })}
-                    placeholder="如：某某書卷X，某某頁；可含《書名》供後續聚合"
-                  />
-                ) : (
-                  <div
-                    className="entry-view-citation"
-                    dangerouslySetInnerHTML={{
-                      __html: renderHighlightedPlainText(
-                        viewedEntryDraft?.citation.trim() || "（無引文註釋）",
-                        entryViewHighlightQuery,
-                      ),
-                    }}
-                  />
-                )}
-              </section>
-
-              {!entryViewModal.editing && viewedEntryBacklinks.length > 0 && (
-                <section className="entry-view-block entry-similar-block" id="entry-view-backlinks">
-                  <div className="entry-view-title entry-similar-head">
-                    <span className="entry-ref-head-icon" dangerouslySetInnerHTML={{ __html: ENTRY_REF_ICON }} />
-                    反向鏈接
-                    <span className="section-count">{viewedEntryBacklinks.length}</span>
-                    <span className="section-hint">這些條目在備註中鏈接到本條，點擊檢視</span>
-                  </div>
-                  <ul className="entry-similar-list backlink-list">
-                    {viewedEntryBacklinks.map((entry) => (
-                      <li
-                        key={entry.id}
-                        role="button"
-                        tabIndex={0}
-                        onClick={() => openEntryRef(entry.refId)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            openEntryRef(entry.refId);
-                          }
-                        }}
-                      >
-                        <div className="entry-similar-main">
-                          <span className="entry-similar-title">
-                            {formatEntryHeadline(entry.timeText, entry.summary ?? "")}
-                          </span>
-                          <span className="search-path">
-                            {workspace.projects[entry.projectId]?.title ?? "未命名專案"} /{" "}
-                            {workspace.chapters[entry.chapterId]?.title ?? "未命名章節"}
-                          </span>
-                          <span
-                            className="backlink-context"
-                            dangerouslySetInnerHTML={{
-                              __html: renderNoteWithRefs(excerptAroundRef(entry.note, viewedEntry.refId), ""),
-                            }}
-                          />
-                        </div>
-                        <span className="backlink-go">檢視 ›</span>
-                      </li>
-                    ))}
-                  </ul>
-                </section>
-              )}
-
-              {!entryViewModal.editing && viewedEntrySimilar.length > 0 && (
-                <section className="entry-view-block entry-similar-block" id="entry-view-similar">
-                  <div className="entry-view-title entry-similar-head">
-                    {SIMILAR_ICON}
-                    相似文本
-                    <span className="section-count">{viewedEntrySimilar.length}</span>
-                    <span className="section-hint">點「比勘」或雙擊一行，逐字對照</span>
-                  </div>
-                  <ul className="entry-similar-list">
-                    {viewedEntrySimilar.slice(0, 6).map((item) => {
-                      const other = workspace.entries[item.entryId];
-                      if (!other) {
-                        return null;
-                      }
-                      return (
-                        <li
-                          key={item.entryId}
-                          onDoubleClick={() => openCompare(viewedEntry.id, item.entryId)}
-                          onMouseDown={(event) => {
-                            if (event.detail > 1) {
-                              event.preventDefault();
-                            }
-                          }}
-                        >
-                          <span
-                            className="similar-ring"
-                            style={{ "--score": String(item.copy ? 1 : item.score) } as CSSProperties}
-                            title={item.copy ? "原文完全相同" : `相似度 ${formatPercent(item.score)}`}
-                          >
-                            <span>{item.copy ? "同" : Math.round(item.score * 100)}</span>
-                          </span>
-                          <div className="entry-similar-main">
-                            <span className="entry-similar-title">
-                              {formatEntryHeadline(other.timeText, other.summary ?? "")}
-                            </span>
-                            <span className="search-path">
-                              {workspace.projects[other.projectId]?.title ?? "未命名專案"} /{" "}
-                              {workspace.chapters[other.chapterId]?.title ?? "未命名章節"} · 相同 {item.sharedChars}{" "}
-                              字 · 一致 {formatPercent(item.identity)}
-                            </span>
-                          </div>
-                          <button
-                            className="mini-btn mini-btn-accent"
-                            onClick={() => openCompare(viewedEntry.id, item.entryId)}
-                          >
-                            比勘
-                          </button>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                  {viewedEntrySimilar.length > 6 && (
-                    <button
-                      className="text-link"
-                      onClick={() => {
-                        setModalState(null);
-                        showSimilarFor(viewedEntry.id);
-                      }}
-                    >
-                      在右欄查看全部 {viewedEntrySimilar.length} 條 ›
-                    </button>
-                  )}
-                </section>
-              )}
-            </div>
-
-            <div className="entry-view-footer">
-              <p className="meta-text entry-view-time-meta">
-                編號 <span className="entry-ref-id">{viewedEntry.refId}</span> ｜ 建立：
-                {formatDateTimeLabel(viewedEntry.createdAt)} ｜ 修改：{formatDateTimeLabel(viewedEntry.updatedAt)}
-              </p>
-              <div className="entry-view-footer-actions">
-                {entryViewModal.editing ? (
-                  <>
-                    <button className="ghost-btn" onClick={cancelEntryViewEditing}>
-                      取消編輯
-                    </button>
-                    <button className="secondary-btn" onClick={applyEntryEditor} title="保存（⌘↵）">
-                      保存修改
-                    </button>
-                  </>
-                ) : (
-                  <>
-                    {(entryViewModal.backStack?.length ?? 0) > 0 && (
-                      <button
-                        className="ghost-btn"
-                        title={(() => {
-                          const stack = entryViewModal.backStack ?? [];
-                          const previous = workspace.entries[stack[stack.length - 1] ?? ""];
-                          return previous
-                            ? `返回「${formatEntryHeadline(previous.timeText, previous.summary ?? "")}」（Esc）`
-                            : "返回上一條（Esc）";
-                        })()}
-                        onClick={goBackInEntryView}
-                      >
-                        ← 返回
-                      </button>
-                    )}
-                    <button
-                      className="ghost-btn"
-                      onClick={() => beginEditEntry(viewedEntry.id, entryViewHighlightQuery)}
-                    >
-                      編輯
-                    </button>
-                    <button className="ghost-btn" onClick={() => setModalState(null)}>
-                      關閉
-                    </button>
-                  </>
-                )}
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
+      {entryViews.map((win) => renderEntryViewWindow(win))}
 
       {entryModal && (
         <div className="modal-backdrop" style={modalBackdropStyle("entry-form")}>
@@ -8162,6 +8208,7 @@ function App() {
               event.stopPropagation();
             }}
           >
+            {renderModalClose("entry-form")}
             <div
               className="modal-head modal-drag-handle"
               onMouseDown={(event) => startModalDrag(event, "entry-form")}
@@ -8264,7 +8311,7 @@ function App() {
             </div>
 
             <div className="modal-actions">
-              <button className="ghost-btn" onClick={() => setModalState(null)}>
+              <button className="ghost-btn" onClick={() => requestCloseOverlayModal("entry-form")}>
                 取消
               </button>
               <button className="secondary-btn" onClick={applyEntryEditor} title="保存（⌘↵）">
@@ -8285,6 +8332,7 @@ function App() {
               event.stopPropagation();
             }}
           >
+            {renderModalClose("similar-overview")}
             <div
               className="modal-head modal-drag-handle"
               onMouseDown={(event) => startModalDrag(event, "similar-overview")}
@@ -8443,11 +8491,6 @@ function App() {
                 <p className="meta-text">只顯示前 300 對，可提高最低相似度縮小範圍。</p>
               )}
             </div>
-            <div className="modal-actions">
-              <button className="ghost-btn" onClick={() => setSimilarOverviewOpen(false)}>
-                關閉
-              </button>
-            </div>
           </div>
         </div>
       )}
@@ -8462,6 +8505,7 @@ function App() {
               event.stopPropagation();
             }}
           >
+            {renderModalClose("compare")}
             <div className="modal-head modal-drag-handle" onMouseDown={(event) => startModalDrag(event, "compare")}>
               <h3>比勘</h3>
               {compareView.result.aligned ? (
@@ -8496,13 +8540,15 @@ function App() {
                   沒有找到對齊段落（每段至少 {similarMinBlock} 字相同），以下改爲整條對照，僅供參考。
                 </p>
               ) : (
-                !compareView.blocks &&
+                (!compareView.blocks || compareScope === "full") &&
                 (!compareView.result.aligned ||
                   Math.max(compareView.result.leftCoverage, compareView.result.rightCoverage) < 0.3) && (
                 <p className="compare-warning">
-                  {compareView.result.aligned
-                    ? "兩段文字重合很少，以下對照僅供參考。"
-                    : "兩段差異太大，未能逐字對齊；下方標出的是不在共有片段中的文字。"}
+                  {!compareView.result.aligned
+                    ? "兩段差異太大，未能逐字對齊；下方標出的是不在共有片段中的文字。"
+                    : compareView.blocks
+                      ? "兩段文字重合很少：加底線的對齊段落可靠，段落以外零散的相同字多屬巧合，僅供參考。"
+                      : "兩段文字重合很少，以下對照僅供參考。"}
                 </p>
                 )
               )}
@@ -8521,7 +8567,7 @@ function App() {
                   <button
                     aria-pressed={compareScope === "full"}
                     onClick={() => setCompareScope("full")}
-                    title="整條對整條逐字比較。長短懸殊時，零散的相同字也會被標出。"
+                    title="整條對整條逐字比較：對齊段落照樣對上（加底線，次序顛倒也不受影響），其餘文字按先後比較，零散的相同字也會被標出。"
                   >
                     全文
                   </button>
@@ -8686,11 +8732,6 @@ function App() {
                 </table>
               </section>
             )}
-            <div className="modal-actions">
-              <button className="ghost-btn" onClick={() => setCompareState(null)}>
-                關閉
-              </button>
-            </div>
           </div>
         </div>
       )}
@@ -8705,6 +8746,7 @@ function App() {
               event.stopPropagation();
             }}
           >
+            {renderModalClose("advanced")}
             <div
               className="modal-head modal-drag-handle"
               onMouseDown={(event) => startModalDrag(event, "advanced")}
@@ -9020,9 +9062,6 @@ function App() {
             </div>
 
             <div className="modal-actions">
-              <button className="ghost-btn" onClick={() => setAdvancedModal((state) => ({ ...state, open: false }))}>
-                確定
-              </button>
               <button
                 className="secondary-btn"
                 onClick={importAdvancedResults}
@@ -9045,6 +9084,7 @@ function App() {
               event.stopPropagation();
             }}
           >
+            {renderModalClose("merge-project")}
             <div
               className="modal-head modal-drag-handle"
               onMouseDown={(event) => startModalDrag(event, "merge-project")}
@@ -9113,7 +9153,7 @@ function App() {
             </div>
 
             <div className="modal-actions">
-              <button className="ghost-btn" onClick={() => setMergeModal((state) => ({ ...state, open: false }))}>
+              <button className="ghost-btn" onClick={() => requestCloseOverlayModal("merge-project")}>
                 取消
               </button>
               <button className="secondary-btn" onClick={executeMerge}>
@@ -9134,6 +9174,7 @@ function App() {
               event.stopPropagation();
             }}
           >
+            {renderModalClose("merge-chapter")}
             <div
               className="modal-head modal-drag-handle"
               onMouseDown={(event) => startModalDrag(event, "merge-chapter")}
@@ -9218,10 +9259,7 @@ function App() {
             </div>
 
             <div className="modal-actions">
-              <button
-                className="ghost-btn"
-                onClick={() => setChapterMergeModal((state) => ({ ...state, open: false }))}
-              >
+              <button className="ghost-btn" onClick={() => requestCloseOverlayModal("merge-chapter")}>
                 取消
               </button>
               <button className="secondary-btn" onClick={executeChapterMerge}>

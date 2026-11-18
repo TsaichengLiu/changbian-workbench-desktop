@@ -1,4 +1,4 @@
-import { isIgnorableChar, toSimplified } from "./search";
+import { isIgnorableChar, toSimplified } from "./text-fold";
 
 // 相似文本與比勘：去掉標點、空白與輕標記，逐字轉為同一字形後比對。
 // 每個字（碼位）是一個 token，並記錄它在原文中的起止位置，結果可標回原文。
@@ -281,7 +281,11 @@ function alignRegion(
 
   // 相同的字 +1；一處相異按兩邊較長者扣分（異文一字扣 1，脫衍 n 字扣 n）。
   // 從某段相同的字起累計，一旦比最高點低出 maxGap 就斷開；斷開前最後一處相同的字為段尾。
-  // 段首、段尾不足「片段長度」的零星相同字（多半是碰巧相同的虛詞）不計入。
+  // 段首、段尾不足「片段長度」的零星相同字（多半是碰巧相同的虛詞）不計入；
+  // 但若它比與段落相隔的差異還長（如「處死五條」與「處死凡五條」中的「五條」），仍算段落的一部分。
+  const gapCost = (run: (typeof runs)[number]) => Math.max(run.aLength, run.bLength);
+  const strayEdge = (edge: number, gap: number) =>
+    runs[edge].aLength < size && runs[edge].aLength <= gapCost(runs[gap]);
   const blocks: AlignedBlock[] = [];
   let index = 0;
   while (index < runs.length) {
@@ -306,10 +310,10 @@ function alignRegion(
     }
     // 相同與相異的片段交替出現，同類相隔兩格。
     let first = index;
-    while (first < end && runs[first].aLength < size) {
+    while (first < end && strayEdge(first, first + 1)) {
       first += 2;
     }
-    while (end > first && runs[end].aLength < size) {
+    while (end > first && strayEdge(end, end - 1)) {
       end -= 2;
     }
     let matches = 0;
@@ -500,9 +504,28 @@ function indexDocument(
   if (!grams) {
     const list = gramsOf(cached.comparable.tokens, size);
     grams = { grams: list, gramSet: new Set(list), positions: gramPositions(list) };
+    // 只留目前片段長度的切分：換長度時舊的切分不再保留，免得每試一種長度就多佔一份。
+    cached.gramsBySize.clear();
     cached.gramsBySize.set(size, grams);
   }
   return { text: cached.text, comparable: cached.comparable, ...grams };
+}
+
+// 兩條之間的對齊段落，跨索引沿用：條目原文與比對規則都沒變時不再重算。
+// 高頻片段由全庫決定，忽略的片段一變，所有快取一併作廢。
+interface CachedPair {
+  firstText: string;
+  secondText: string;
+  rulesKey: string;
+  blocks: AlignedBlock[];
+}
+
+const pairCache = new Map<string, CachedPair>();
+
+/** 測試用：清空跨索引的快取。 */
+export function clearSimilarityCaches(): void {
+  documentCache.clear();
+  pairCache.clear();
 }
 
 export class SimilarityIndex {
@@ -518,8 +541,8 @@ export class SimilarityIndex {
   private readonly documents = new Map<string, IndexedDocument & { text: string }>();
   private readonly postings = new Map<string, string[]>();
   private readonly ignoredGrams: Set<string>;
-  // 兩條之間的對齊段落，以 id 較小的一條為 a。
-  private readonly pairBlocks = new Map<string, AlignedBlock[]>();
+  // 影響對齊結果的規則；與 pairCache 中的記錄比對。
+  private readonly rulesKey: string;
 
   constructor(documents: SimilarityDocument[], options: SimilarityOptions = {}) {
     this.gramSize = clampGramSize(options.gramSize ?? DEFAULT_GRAM_SIZE);
@@ -566,6 +589,20 @@ export class SimilarityIndex {
       .map(([gram, entryCount]) => ({ text: this.sampleText(gram), entryCount }))
       .sort((a, b) => b.entryCount - a.entryCount || a.text.localeCompare(b.text));
     this.ignoredGrams = this.ignoreFrequentFragments ? new Set(frequentGrams.keys()) : new Set();
+    this.rulesKey = [
+      this.gramSize,
+      this.minBlockChars,
+      this.maxGap,
+      this.strict ? 1 : 0,
+      [...this.ignoredGrams].sort().join("\u0002"),
+    ].join("\u0001");
+    // 已刪去的條目、或規則已變的記錄不再有用，清掉以免快取無限增長。
+    for (const [key, cached] of pairCache) {
+      const [firstId, secondId] = key.split("\u0001");
+      if (cached.rulesKey !== this.rulesKey || !this.documents.has(firstId) || !this.documents.has(secondId)) {
+        pairCache.delete(key);
+      }
+    }
   }
 
   // 取片段第一次出現處的原文，供界面顯示。
@@ -584,10 +621,19 @@ export class SimilarityIndex {
   private blocksBetween(anchorId: string, candidateId: string): AlignedBlock[] {
     const [firstId, secondId] = anchorId < candidateId ? [anchorId, candidateId] : [candidateId, anchorId];
     const key = `${firstId}\u0001${secondId}`;
-    let blocks = this.pairBlocks.get(key);
+    const first = this.documents.get(firstId);
+    const second = this.documents.get(secondId);
+    const cached = pairCache.get(key);
+    let blocks =
+      cached &&
+      first &&
+      second &&
+      cached.rulesKey === this.rulesKey &&
+      cached.firstText === first.text &&
+      cached.secondText === second.text
+        ? cached.blocks
+        : undefined;
     if (!blocks) {
-      const first = this.documents.get(firstId);
-      const second = this.documents.get(secondId);
       const input = (document: IndexedDocument): AlignInput => ({
         tokens: document.comparable.tokens,
         grams: document.grams,
@@ -606,7 +652,9 @@ export class SimilarityIndex {
               this.maxGap,
             )
           : [];
-      this.pairBlocks.set(key, blocks);
+      if (first && second) {
+        pairCache.set(key, { firstText: first.text, secondText: second.text, rulesKey: this.rulesKey, blocks });
+      }
     }
     return anchorId === firstId ? blocks : mirrorBlocks(blocks);
   }
@@ -822,51 +870,74 @@ export interface CompareResult {
   equalChars: number;
   leftCoverage: number;
   rightCoverage: number;
-  // 只比對齊段落時為各段區間（a 為左、b 為右）；全文比勘時為 null；
+  // 對齊段落的區間（a 為左、b 為右）；不找段落、或比全文而找不到段落時為 null；
   // 要求只比段落卻找不到時為空陣列，此時其餘欄位是全文比勘的結果。
   blocks: AlignedBlock[] | null;
-  // 不在任何對齊段落中的字（只比對齊段落時才有）。
+  // 不在任何對齊段落中的字（只比對齊段落時才有；比全文時為 null）。
   leftOutside: Uint8Array | null;
   rightOutside: Uint8Array | null;
 }
 
-// 把逐字差異轉成標記與異文列表，回傳相同的字數。offset 為這段在全文中的起點。
+// 把逐字差異轉成標記與異文列表，回傳相同的字數。
+// aAt、bAt 把 ops 中的位置換成全文中的位置；aCursor、bCursor 為比較起點在全文中的位置。
+// 比較的文字中間若跳過了一段（如另行比較的對齊段落），差異在跳過處分成兩處。
 function collectHunks(
   ops: DiffOp[],
-  aOffset: number,
-  bOffset: number,
+  aAt: (index: number) => number,
+  bAt: (index: number) => number,
+  aCursor: number,
+  bCursor: number,
   leftMarks: Uint8Array,
   rightMarks: Uint8Array,
   hunks: DiffHunk[],
 ): number {
   let equalChars = 0;
   let open: DiffHunk | null = null;
-  let aCursor = aOffset;
-  let bCursor = bOffset;
   for (const op of ops) {
-    const aIndex = op.aIndex + aOffset;
-    const bIndex = op.bIndex + bOffset;
     if (op.type === "equal") {
       equalChars += 1;
       if (open) {
         hunks.push(open);
         open = null;
       }
-      aCursor = aIndex + 1;
-      bCursor = bIndex + 1;
+      aCursor = aAt(op.aIndex) + 1;
+      bCursor = bAt(op.bIndex) + 1;
       continue;
     }
-    if (!open) {
-      open = { aStart: aCursor, aEnd: aCursor, bStart: bCursor, bEnd: bCursor };
-    }
     if (op.type === "delete") {
-      leftMarks[aIndex] = 1;
-      open.aEnd = aIndex + 1;
-      aCursor = aIndex + 1;
+      const index = aAt(op.aIndex);
+      leftMarks[index] = 1;
+      if (open && open.aEnd !== index) {
+        if (open.aEnd > open.aStart) {
+          hunks.push(open);
+          open = null;
+        } else {
+          open.aStart = index;
+          open.aEnd = index;
+        }
+      }
+      if (!open) {
+        open = { aStart: index, aEnd: index, bStart: bCursor, bEnd: bCursor };
+      }
+      open.aEnd = index + 1;
+      aCursor = index + 1;
     } else {
-      rightMarks[bIndex] = 1;
-      open.bEnd = bIndex + 1;
-      bCursor = bIndex + 1;
+      const index = bAt(op.bIndex);
+      rightMarks[index] = 1;
+      if (open && open.bEnd !== index) {
+        if (open.bEnd > open.bStart) {
+          hunks.push(open);
+          open = null;
+        } else {
+          open.bStart = index;
+          open.bEnd = index;
+        }
+      }
+      if (!open) {
+        open = { aStart: aCursor, aEnd: aCursor, bStart: index, bEnd: index };
+      }
+      open.bEnd = index + 1;
+      bCursor = index + 1;
     }
   }
   if (open) {
@@ -874,6 +945,8 @@ function collectHunks(
   }
   return equalChars;
 }
+
+const unmarkedShare = (marks: Uint8Array) => (marks.length ? (marks.length - countMarked(marks)) / marks.length : 0);
 
 function compareWhole(left: ComparableText, right: ComparableText): CompareResult {
   const leftMarks = new Uint8Array(left.tokens.length);
@@ -912,7 +985,8 @@ function compareWhole(left: ComparableText, right: ComparableText): CompareResul
   }
 
   const hunks: DiffHunk[] = [];
-  const equalChars = collectHunks(ops, 0, 0, leftMarks, rightMarks, hunks);
+  const same = (index: number) => index;
+  const equalChars = collectHunks(ops, same, same, 0, 0, leftMarks, rightMarks, hunks);
   return {
     left,
     right,
@@ -942,7 +1016,16 @@ function compareWithinBlocks(left: ComparableText, right: ComparableText, blocks
     rightOutside.fill(0, block.bStart, block.bEnd);
     const ops = diffTokens(left.tokens.slice(block.aStart, block.aEnd), right.tokens.slice(block.bStart, block.bEnd));
     if (ops) {
-      equalChars += collectHunks(ops, block.aStart, block.bStart, leftMarks, rightMarks, hunks);
+      equalChars += collectHunks(
+        ops,
+        (index) => block.aStart + index,
+        (index) => block.bStart + index,
+        block.aStart,
+        block.bStart,
+        leftMarks,
+        rightMarks,
+        hunks,
+      );
     } else {
       // 段內一致率已過半，理應不會發生；保險起見整段作一處差異。
       leftMarks.fill(1, block.aStart, block.aEnd);
@@ -966,12 +1049,72 @@ function compareWithinBlocks(left: ComparableText, right: ComparableText, blocks
   };
 }
 
-// alignOptions 不為 null 時只比對齊段落（段落按繁簡歸一後的文字找出，strict 只影響段內逐字比較）。
+// 全文比勘：先在各對齊段落內逐字比較（段落先後次序不同也照樣對上），
+// 段落以外的文字再按先後整體比較一次。這樣全文所見必然包含只比段落時所見。
+function compareAroundBlocks(left: ComparableText, right: ComparableText, blocks: AlignedBlock[]): CompareResult {
+  const within = compareWithinBlocks(left, right, blocks);
+  const { leftMarks, rightMarks, hunks } = within;
+  const rest = (outside: Uint8Array) => {
+    const positions: number[] = [];
+    outside.forEach((value, index) => {
+      if (value) {
+        positions.push(index);
+      }
+    });
+    return positions;
+  };
+  const leftRest = rest(within.leftOutside!);
+  const rightRest = rest(within.rightOutside!);
+  const leftRestTokens = leftRest.map((index) => left.tokens[index]);
+  const rightRestTokens = rightRest.map((index) => right.tokens[index]);
+  const ops = diffTokens(leftRestTokens, rightRestTokens);
+  let equalChars = within.equalChars;
+  if (ops) {
+    equalChars += collectHunks(
+      ops,
+      (index) => leftRest[index],
+      (index) => rightRest[index],
+      leftRest[0] ?? 0,
+      rightRest[0] ?? 0,
+      leftMarks,
+      rightMarks,
+      hunks,
+    );
+    hunks.sort((x, y) => x.aStart - y.aStart || x.bStart - y.bStart);
+  } else {
+    // 段落以外差異太大無法逐字對齊時，只標出其中共有的 4 字片段。
+    const none = new Set<string>();
+    const leftGrams = gramsOf(leftRestTokens, DEFAULT_GRAM_SIZE);
+    const rightGrams = gramsOf(rightRestTokens, DEFAULT_GRAM_SIZE);
+    const leftShared = sharedMask(leftGrams, new Set(rightGrams), leftRest.length, none, DEFAULT_GRAM_SIZE);
+    const rightShared = sharedMask(rightGrams, new Set(leftGrams), rightRest.length, none, DEFAULT_GRAM_SIZE);
+    leftRest.forEach((index, position) => {
+      leftMarks[index] = leftShared[position] ? 0 : 1;
+    });
+    rightRest.forEach((index, position) => {
+      rightMarks[index] = rightShared[position] ? 0 : 1;
+    });
+    equalChars += countMarked(leftShared);
+  }
+  return {
+    ...within,
+    equalChars,
+    leftCoverage: unmarkedShare(leftMarks),
+    rightCoverage: unmarkedShare(rightMarks),
+    leftOutside: null,
+    rightOutside: null,
+  };
+}
+
+// alignOptions 為 null 時整條對整條按先後逐字比較。
+// 否則先找出對齊段落（按繁簡歸一後的文字找，strict 只影響逐字比較）：
+// wholeText 為 false 時只比段落；為 true 時比全文，段落之外的文字也按先後比較。
 export function compareTexts(
   leftText: string,
   rightText: string,
   strict = false,
   alignOptions: AlignOptions | null = null,
+  wholeText = false,
 ): CompareResult {
   const left = toComparableText(leftText, strict);
   const right = toComparableText(rightText, strict);
@@ -980,6 +1123,9 @@ export function compareTexts(
   }
   // 歸一與否只改變字形，不改變 token 的數目與位置，段落區間可通用。
   const blocks = alignTexts(leftText, rightText, alignOptions);
+  if (wholeText) {
+    return blocks.length > 0 ? compareAroundBlocks(left, right, blocks) : compareWhole(left, right);
+  }
   return blocks.length > 0 ? compareWithinBlocks(left, right, blocks) : { ...compareWhole(left, right), blocks: [] };
 }
 

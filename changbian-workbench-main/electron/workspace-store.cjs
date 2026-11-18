@@ -275,6 +275,33 @@ function validateWorkspace(raw) {
   };
 }
 
+// 本程序最近一次讀寫後的檔案狀態（大小、修改時間、inode）。檔案沒被別的程序動過時，
+// 存檔不必再讀入、解析整個檔案來核對版本；外部寫入（含 MCP 的原子替換）會改變 inode 或時間。
+const knownFileStates = new Map();
+
+function fileStamp(filePath) {
+  try {
+    const stat = fs.statSync(filePath);
+    return `${stat.size}:${stat.mtimeMs}:${stat.ino}`;
+  } catch {
+    return null;
+  }
+}
+
+function rememberFileState(filePath, revision) {
+  const stamp = fileStamp(filePath);
+  if (stamp) {
+    knownFileStates.set(path.resolve(filePath), { stamp, revision });
+  }
+}
+
+/** 檔案自本程序上次讀寫後未變時，回傳當時的版本號；否則回傳 null。 */
+function knownRevisionIfUnchanged(filePath) {
+  const known = knownFileStates.get(path.resolve(filePath));
+  if (!known) return null;
+  return fileStamp(filePath) === known.stamp ? known.revision : null;
+}
+
 function readWorkspaceFile(filePath) {
   if (!fs.existsSync(filePath)) return { ok: true, workspace: null, revision: 0 };
   try {
@@ -283,6 +310,7 @@ function readWorkspaceFile(filePath) {
     if (!validation.ok) {
       return { ok: false, error: `資料格式無效：${validation.errors.slice(0, 4).join("；")}` };
     }
+    rememberFileState(filePath, validation.workspace.revision);
     return {
       ok: true,
       workspace: validation.workspace,
@@ -324,6 +352,38 @@ function releaseLock(lock) {
   try { fs.rmSync(lock.lockPath, { force: true }); } catch {}
 }
 
+// 存檔先寫入「.檔名.程序號.時間….tmp」再改名替換；寫到一半程序中斷時暫存檔會留下來。
+// 啟動時清掉同一目錄裡、屬於這個檔案且已放置一段時間的暫存檔（正在寫的不會這麼舊）。
+const STALE_TEMP_MS = 10 * 60 * 1000;
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function removeStaleTempFiles(filePath, now = Date.now()) {
+  const directory = path.dirname(filePath);
+  const pattern = new RegExp(`^\\.${escapeRegExp(path.basename(filePath))}\\.\\d+\\.\\d+(\\.[0-9a-f]+)?\\.tmp$`);
+  const removed = [];
+  let names = [];
+  try {
+    names = fs.readdirSync(directory);
+  } catch {
+    return removed;
+  }
+  for (const name of names) {
+    if (!pattern.test(name)) continue;
+    const tempPath = path.join(directory, name);
+    try {
+      if (now - fs.statSync(tempPath).mtimeMs < STALE_TEMP_MS) continue;
+      fs.rmSync(tempPath, { force: true });
+      removed.push(name);
+    } catch {
+      // 讀不到或刪不掉就留著，下次再試。
+    }
+  }
+  return removed;
+}
+
 function writeWorkspaceFile(filePath, workspace, options = {}) {
   const validation = validateWorkspace(workspace);
   if (!validation.ok) {
@@ -334,15 +394,17 @@ function writeWorkspaceFile(filePath, workspace, options = {}) {
   let tempPath = "";
   try {
     lock = acquireLock(filePath);
-    const current = readWorkspaceFile(filePath);
-    if (!current.ok && !options.allowReplaceInvalid) return current;
-    const currentRevision = current.ok ? current.revision : 0;
+    const knownRevision = knownRevisionIfUnchanged(filePath);
+    let current = knownRevision === null ? readWorkspaceFile(filePath) : null;
+    if (current && !current.ok && !options.allowReplaceInvalid) return current;
+    const currentRevision = knownRevision ?? (current?.ok ? current.revision : 0);
     if (Number.isInteger(options.expectedRevision) && options.expectedRevision !== currentRevision) {
+      current ??= readWorkspaceFile(filePath);
       return {
         ok: false,
         conflict: true,
         revision: currentRevision,
-        workspace: current.ok ? current.workspace : null,
+        workspace: current?.ok ? current.workspace : null,
         error: `資料已由其他程序更新（目前版本 ${currentRevision}，本機版本 ${options.expectedRevision}）`,
       };
     }
@@ -355,6 +417,7 @@ function writeWorkspaceFile(filePath, workspace, options = {}) {
     fs.writeFileSync(tempPath, JSON.stringify(nextWorkspace, null, 2), "utf8");
     if (fs.existsSync(filePath)) fs.copyFileSync(filePath, `${filePath}.bak`);
     fs.renameSync(tempPath, filePath);
+    rememberFileState(filePath, nextRevision);
     return { ok: true, revision: nextRevision, workspace: nextWorkspace };
   } catch (error) {
     if (tempPath) {
@@ -369,9 +432,11 @@ function writeWorkspaceFile(filePath, workspace, options = {}) {
 module.exports = {
   WORKSPACE_SCHEMA_VERSION,
   formatEntryRefId,
+  knownRevisionIfUnchanged,
   nextFreeEntryRefId,
   usedEntryRefIds,
   readWorkspaceFile,
+  removeStaleTempFiles,
   validateWorkspace,
   writeWorkspaceFile,
 };

@@ -80,7 +80,7 @@ interface AppearanceBridge {
   ) => () => void;
 }
 
-type SearchBridgeScope = "project" | "chapter" | "time" | "summary" | "source" | "note" | "citation";
+type SearchBridgeScope = "project" | "chapter" | "time" | "summary" | "source" | "note" | "citation" | "refId";
 
 interface SearchBridgeCriteria {
   query: string;
