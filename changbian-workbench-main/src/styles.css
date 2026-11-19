@@ -1214,6 +1214,20 @@ select:focus-visible,
   padding: 0 2px;
 }
 
+/* 模糊命中：相同與不同的字分段標出，去掉內距，讓一處命中連成一條；
+   不同的字（異文、衍文）淺底加底線，文字沿用正文顏色，深色主題下也看得清。 */
+.match-highlight.match-fuzzy {
+  padding: 0;
+  border-radius: 2px;
+}
+
+.match-highlight.match-fuzzy-diff {
+  background: color-mix(in srgb, var(--highlight) 45%, transparent);
+  color: inherit;
+  text-decoration: underline 1.5px solid #c99a1e;
+  text-underline-offset: 3px;
+}
+
 .empty-state,
 .empty-inline {
   margin: 0;
@@ -1896,6 +1910,86 @@ select:focus-visible,
   display: flex;
   flex-direction: column;
   gap: 10px;
+}
+
+/* 高級檢索：模糊檢索開關、最低相似度與標黃圖例 */
+.advanced-fuzzy-panel {
+  border: 1px solid color-mix(in srgb, var(--ink-line) 16%, transparent);
+  border-radius: 12px;
+  background: var(--card);
+  padding: 9px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.advanced-fuzzy-panel.active {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  background: color-mix(in srgb, var(--accent) 5%, var(--card));
+}
+
+.advanced-fuzzy-toggle {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  color: var(--ink-0);
+  cursor: pointer;
+  user-select: none;
+}
+
+.advanced-fuzzy-toggle input {
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.advanced-fuzzy-toggle .meta-text {
+  font-size: 12px;
+}
+
+.advanced-fuzzy-slider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.advanced-fuzzy-slider input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  accent-color: var(--accent);
+}
+
+.advanced-fuzzy-slider output {
+  min-width: 3.2em;
+  text-align: right;
+  color: var(--ink-0);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.advanced-fuzzy-legend {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+  font-size: 12px;
+}
+
+.advanced-result-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.advanced-result-top .search-path {
+  min-width: 0;
+}
+
+.advanced-result-top .metric-chip {
+  flex: none;
+  line-height: 1.6;
 }
 
 .advanced-scope-panel {

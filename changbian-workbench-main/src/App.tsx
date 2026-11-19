@@ -18,6 +18,13 @@ import { applyLightMarkup } from "./light-markup";
 import { isIgnorableChar, toSimplified } from "./text-fold";
 import type { SearchCriteria, SearchResult } from "./search-engine";
 import {
+  FUZZY_DEFAULT_MIN_SIMILARITY,
+  FUZZY_MIN_SIMILARITY_FLOOR,
+  fuzzyHighlightRanges,
+  type FuzzyCriteria,
+} from "./fuzzy-search";
+import type { FuzzyWorkerRequest, FuzzyWorkerResponse } from "./fuzzy-search-worker";
+import {
   compareTexts,
   DEFAULT_GRAM_SIZE,
   DEFAULT_MAX_GAP,
@@ -77,6 +84,11 @@ const SIMILAR_MIN_BLOCK_KEY = "longform_history_workbench_similar_min_block_v1";
 const SIMILAR_MAX_GAP_KEY = "longform_history_workbench_similar_max_gap_v1";
 const SIMILAR_MAX_GAP_OPTIONS = [6, 8, 12, 16, 24];
 const SIMILAR_STRICT_KEY = "longform_history_workbench_similar_strict_v1";
+// 高級檢索的模糊檢索：開關與最低相似度（百分比）。
+const ADVANCED_FUZZY_KEY = "longform_history_workbench_advanced_fuzzy_v1";
+const ADVANCED_FUZZY_MIN_KEY = "longform_history_workbench_advanced_fuzzy_min_v1";
+const FUZZY_MIN_PERCENT = Math.round(FUZZY_MIN_SIMILARITY_FLOOR * 100);
+const FUZZY_DEFAULT_PERCENT = Math.round(FUZZY_DEFAULT_MIN_SIMILARITY * 100);
 const SIMILAR_MIN_ORDER_DEFAULT = 0;
 
 // 每條史料的相似文本摘要（背景計算），用於卡片與檢視窗中的提示。
@@ -1198,12 +1210,14 @@ function findHighlightRanges(text: string, tokens: string[]): Array<{ start: num
   return merged;
 }
 
-function wrapTextRanges(text: string, ranges: Array<{ start: number; end: number }>, className: string): string {
+type HighlightRange = { start: number; end: number; className?: string };
+
+function wrapTextRanges(text: string, ranges: HighlightRange[], className: string): string {
   let html = "";
   let cursor = 0;
   for (const range of ranges) {
     html += escapeHtml(text.slice(cursor, range.start));
-    html += `<mark class="${className}">${escapeHtml(text.slice(range.start, range.end))}</mark>`;
+    html += `<mark class="${range.className ?? className}">${escapeHtml(text.slice(range.start, range.end))}</mark>`;
     cursor = range.end;
   }
   return html + escapeHtml(text.slice(cursor));
@@ -1253,8 +1267,54 @@ function renderAlignedText(
   return html;
 }
 
-function wrapHighlightRanges(text: string, tokens: string[]): string {
-  return wrapTextRanges(text, findHighlightRanges(text, tokens), "match-highlight");
+// 模糊檢索時，標黃用的檢索詞前面加一個打不出來的記號和最低相似度，
+// 隨檢索結果一路傳到結果卡、條目列表與檢視窗；標黃時按近似比對標出，
+// 命中裡與檢索詞相同的字照常標黃，不同的字（異文、衍文）標淺色加底線。
+const FUZZY_QUERY_MARK = "\u0001fuzzy:";
+
+function encodeFuzzyHighlightQuery(query: string, minPercent: number): string {
+  return `${FUZZY_QUERY_MARK}${minPercent}:${query}`;
+}
+
+function decodeFuzzyHighlightQuery(query: string): { query: string; minSimilarity: number } | null {
+  if (!query.startsWith(FUZZY_QUERY_MARK)) {
+    return null;
+  }
+  const rest = query.slice(FUZZY_QUERY_MARK.length);
+  const colon = rest.indexOf(":");
+  const percent = Number(rest.slice(0, colon));
+  return colon > 0 && Number.isFinite(percent) ? { query: rest.slice(colon + 1), minSimilarity: percent / 100 } : null;
+}
+
+// 同一段文字在重繪時會反覆標黃，近似比對的結果按（檢索詞, 文字）緩存。
+const fuzzyRangeCache = new Map<string, HighlightRange[]>();
+
+function queryHighlightRanges(text: string, query: string): HighlightRange[] {
+  if (!text) {
+    return [];
+  }
+  const fuzzy = decodeFuzzyHighlightQuery(query);
+  if (!fuzzy) {
+    return findHighlightRanges(text, buildHighlightTokens(query));
+  }
+  const key = `${query}\u0002${text}`;
+  let ranges = fuzzyRangeCache.get(key);
+  if (!ranges) {
+    ranges = fuzzyHighlightRanges(text, fuzzy.query, fuzzy.minSimilarity).map((range) => ({
+      start: range.start,
+      end: range.end,
+      className: range.same ? "match-highlight match-fuzzy" : "match-highlight match-fuzzy match-fuzzy-diff",
+    }));
+    if (fuzzyRangeCache.size >= 600) {
+      fuzzyRangeCache.clear();
+    }
+    fuzzyRangeCache.set(key, ranges);
+  }
+  return ranges;
+}
+
+function wrapHighlightRanges(text: string, query: string): string {
+  return wrapTextRanges(text, queryHighlightRanges(text, query), "match-highlight");
 }
 
 
@@ -1331,13 +1391,8 @@ function describeSimilarMatch(match: SimilarMatch, first = "比較對象", secon
   return parts.join("\n");
 }
 
-function findFirstTokenMatch(text: string, tokens: string[]): { index: number; length: number } | null {
-  const [first] = findHighlightRanges(text, tokens);
-  return first ? { index: first.start, length: first.end - first.start } : null;
-}
-
 function hasHighlightMatch(text: string, query: string): boolean {
-  return findHighlightRanges(text, buildHighlightTokens(query)).length > 0;
+  return queryHighlightRanges(text, query).length > 0;
 }
 
 // 檢索結果卡上的備註摘錄：標籤已另以標籤顯示，摘錄只取標籤以外的文字。
@@ -1354,11 +1409,11 @@ function summarizeAroundMatch(text: string, query: string, max = 120): string {
     return normalized;
   }
 
-  const tokens = buildHighlightTokens(query);
-  const match = findFirstTokenMatch(normalized, tokens);
-  if (!match) {
+  const [first] = queryHighlightRanges(normalized, query);
+  if (!first) {
     return summarize(normalized, max);
   }
+  const match = { index: first.start, length: first.end - first.start };
 
   const safeMax = Math.max(24, max);
   const halfWindow = Math.max(8, Math.floor((safeMax - match.length) / 2));
@@ -1384,12 +1439,12 @@ function summarizeAroundMatch(text: string, query: string, max = 120): string {
 }
 
 function renderHighlightedPlainText(text: string, query: string): string {
-  const html = wrapHighlightRanges(text || "", buildHighlightTokens(query));
+  const html = wrapHighlightRanges(text || "", query);
   return html.replace(/\r?\n/g, "<br />");
 }
 
 function renderHighlightedLightMarkup(text: string, query: string): string {
-  return applyLightMarkup(wrapHighlightRanges(text || "", buildHighlightTokens(query)));
+  return applyLightMarkup(wrapHighlightRanges(text || "", query));
 }
 
 const SEARCH_DEBOUNCE_MS = 160;
@@ -1512,7 +1567,8 @@ function App() {
   // 鍵為固定彈窗名，或檢視窗的 view:<winId>。
   const [modalOrders, setModalOrders] = useState<Record<string, number>>(() => createOverlayModalMap(0));
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
-  const [advancedResults, setAdvancedResults] = useState<SearchResult[]>([]);
+  // 模糊檢索的結果另帶相似度。
+  const [advancedResults, setAdvancedResults] = useState<Array<SearchResult & { similarity?: number }>>([]);
   const [selectedSearchResultEntryId, setSelectedSearchResultEntryId] = useState<string | null>(null);
   const [selectedAdvancedResultEntryId, setSelectedAdvancedResultEntryId] = useState<string | null>(null);
   const [entryListScrollTop, setEntryListScrollTop] = useState(0);
@@ -1549,6 +1605,10 @@ function App() {
     loadStoredInteger(SIMILAR_GRAM_KEY, MIN_GRAM_SIZE, MAX_GRAM_SIZE, DEFAULT_GRAM_SIZE),
   );
   const [similarStrict, setSimilarStrict] = useState(() => loadStoredInteger(SIMILAR_STRICT_KEY, 0, 1, 0) === 1);
+  const [advancedFuzzy, setAdvancedFuzzy] = useState(() => loadStoredInteger(ADVANCED_FUZZY_KEY, 0, 1, 0) === 1);
+  const [advancedFuzzyMin, setAdvancedFuzzyMin] = useState(() =>
+    loadStoredInteger(ADVANCED_FUZZY_MIN_KEY, FUZZY_MIN_PERCENT, 100, FUZZY_DEFAULT_PERCENT),
+  );
   const [similarMaxGap, setSimilarMaxGap] = useState(() =>
     loadStoredInteger(SIMILAR_MAX_GAP_KEY, MIN_MAX_GAP, MAX_MAX_GAP, DEFAULT_MAX_GAP),
   );
@@ -1626,6 +1686,9 @@ function App() {
   const searchWorkerRef = useRef<Worker | null>(null);
   const globalSearchRequestRef = useRef(0);
   const advancedSearchRequestRef = useRef(0);
+  // 模糊檢索線程：第一次用時才建立，關掉模糊檢索或高級檢索窗時結束，釋放記憶體。
+  const fuzzyWorkerRef = useRef<Worker | null>(null);
+  const fuzzyIndexedSignatureRef = useRef("");
   const chapterSelectionAnchorRef = useRef<string | null>(null);
   const entrySelectionAnchorRef = useRef<string | null>(null);
   const modalDragStateRef = useRef<ModalDragState | null>(null);
@@ -1927,11 +1990,16 @@ function App() {
   const deferredAdvancedQuery = useDeferredValue(debouncedAdvancedQuery);
   const deferredAdvancedTag = useDeferredValue(debouncedAdvancedTag);
   const deferredAdvancedQueryScopes = useDeferredValue(advancedModal.queryScopes);
+  const debouncedAdvancedFuzzyMin = useDebouncedValue(advancedFuzzyMin);
+  const advancedFuzzyActive = advancedFuzzy && Boolean(deferredAdvancedQuery.trim());
+  // 模糊檢索只在高級檢索窗開著時跑；內容改動後要重送全庫給線程。
+  const fuzzySearchKey = advancedFuzzy && advancedModal.open ? contentSignature : null;
 
   const hasSearch = Boolean(deferredGlobalQuery.trim());
   const searchHighlightQuery = globalQuery.trim();
-  const advancedHighlightQuery =
-    advancedModal.query.trim() || normalizeTagInput(advancedModal.tag);
+  const advancedHighlightQuery = advancedFuzzyActive
+    ? encodeFuzzyHighlightQuery(deferredAdvancedQuery.trim(), debouncedAdvancedFuzzyMin)
+    : advancedModal.query.trim() || normalizeTagInput(advancedModal.tag);
   const centerEntryHighlightQuery = advancedModal.open
     ? advancedHighlightQuery
     : searchHighlightQuery;
@@ -2513,6 +2581,21 @@ function App() {
   }, [readingFontSize]);
 
   useEffect(() => {
+    writeLocalStorage(ADVANCED_FUZZY_KEY, advancedFuzzy ? 1 : 0);
+    writeLocalStorage(ADVANCED_FUZZY_MIN_KEY, advancedFuzzyMin);
+  }, [advancedFuzzy, advancedFuzzyMin]);
+
+  useEffect(() => {
+    if (!advancedFuzzy || !advancedModal.open) {
+      return;
+    }
+    return () => {
+      fuzzyWorkerRef.current?.terminate();
+      fuzzyWorkerRef.current = null;
+    };
+  }, [advancedFuzzy, advancedModal.open]);
+
+  useEffect(() => {
     writeLocalStorage(SIMILAR_GRAM_KEY, similarGramSize);
     writeLocalStorage(SIMILAR_MIN_BLOCK_KEY, similarMinBlock);
     writeLocalStorage(SIMILAR_MAX_GAP_KEY, similarMaxGap);
@@ -2818,9 +2901,57 @@ function App() {
       return;
     }
 
+    if (advancedFuzzy && criteria.query.trim() && fuzzySearchKey === null) {
+      // 高級檢索窗已關：保留上次結果，不在背景重跑模糊檢索。
+      return;
+    }
+
     const requestId = advancedSearchRequestRef.current + 1;
     advancedSearchRequestRef.current = requestId;
     let cancelled = false;
+
+    if (advancedFuzzy && criteria.query.trim() && fuzzySearchKey !== null) {
+      const fuzzyCriteria: FuzzyCriteria = {
+        query: criteria.query,
+        queryScopes: criteria.queryScopes,
+        tag: criteria.tag,
+        minSimilarity: debouncedAdvancedFuzzyMin / 100,
+      };
+      let worker = fuzzyWorkerRef.current;
+      if (!worker && typeof Worker !== "undefined") {
+        worker = new Worker(new URL("./fuzzy-search-worker.ts", import.meta.url), { type: "module" });
+        worker.addEventListener("message", (event: MessageEvent<FuzzyWorkerResponse>) => {
+          const message = event.data;
+          if (!message || message.requestId !== advancedSearchRequestRef.current) {
+            return;
+          }
+          const results = message.type === "result" ? message.results : [];
+          startSearchTransition(() => setAdvancedResults(results));
+        });
+        fuzzyWorkerRef.current = worker;
+        fuzzyIndexedSignatureRef.current = "";
+      }
+      if (worker) {
+        if (fuzzyIndexedSignatureRef.current !== fuzzySearchKey) {
+          const indexRequest: FuzzyWorkerRequest = { type: "index", payload: workspaceRef.current };
+          worker.postMessage(indexRequest);
+          fuzzyIndexedSignatureRef.current = fuzzySearchKey;
+        }
+        const request: FuzzyWorkerRequest = { type: "search", requestId, criteria: fuzzyCriteria };
+        worker.postMessage(request);
+        return;
+      }
+      void import("./fuzzy-search").then(({ buildFuzzyDocuments, fuzzySearch }) => {
+        if (cancelled || requestId !== advancedSearchRequestRef.current) {
+          return;
+        }
+        const next = fuzzySearch(buildFuzzyDocuments(workspaceRef.current), fuzzyCriteria);
+        startSearchTransition(() => setAdvancedResults(next));
+      });
+      return () => {
+        cancelled = true;
+      };
+    }
 
     async function runSearch(): Promise<void> {
       const sqliteResults = await queryBySqlite(criteria);
@@ -2861,6 +2992,9 @@ function App() {
     deferredAdvancedTag,
     nativeSearchAvailable,
     startSearchTransition,
+    advancedFuzzy,
+    debouncedAdvancedFuzzyMin,
+    fuzzySearchKey,
   ]);
 
   useEffect(() => {
@@ -8788,6 +8922,42 @@ function App() {
                   </label>
                 </div>
 
+                <section className={`advanced-fuzzy-panel ${advancedFuzzy ? "active" : ""}`}>
+                  <label className="advanced-fuzzy-toggle">
+                    <input
+                      type="checkbox"
+                      checked={advancedFuzzy}
+                      onChange={(event) => setAdvancedFuzzy(event.target.checked)}
+                    />
+                    <span>模糊檢索</span>
+                    <span className="meta-text">容許異文、脫文、衍文，結果按相似度排序</span>
+                  </label>
+                  {advancedFuzzy && (
+                    <>
+                      <label
+                        className="advanced-fuzzy-slider"
+                        title={"相似度 = 1 − 編輯距離 ÷ 檢索詞字數。\n編輯距離即把命中的文字改成檢索詞所需的最少增、刪、改字數；\n檢索詞以空格分成幾個詞時，各詞都須近似出現，取其中最低者。"}
+                      >
+                        <span className="control-label">最低相似度</span>
+                        <input
+                          type="range"
+                          min={FUZZY_MIN_PERCENT}
+                          max={100}
+                          step={5}
+                          value={advancedFuzzyMin}
+                          onChange={(event) => setAdvancedFuzzyMin(Number(event.target.value))}
+                        />
+                        <output>{advancedFuzzyMin}%</output>
+                      </label>
+                      <p className="meta-text advanced-fuzzy-legend">
+                        <mark className="match-highlight">相同</mark>
+                        <mark className="match-highlight match-fuzzy match-fuzzy-diff">異文、衍文</mark>
+                        <span>脫文無字可標，從相似度看出。</span>
+                      </p>
+                    </>
+                  )}
+                </section>
+
                 <section className="advanced-scope-panel">
                   <div className="advanced-scope-head">
                     <p className="eyebrow">關鍵字檢索範圍</p>
@@ -8939,7 +9109,7 @@ function App() {
                   <p className="eyebrow">檢索預覽</p>
                   <p className="result-meta">
                     {hasAdvancedSearch
-                      ? `共 ${advancedResults.length} 條結果`
+                      ? `共 ${advancedResults.length} 條結果${advancedFuzzyActive ? "（按相似度排序）" : ""}`
                       : "請至少輸入一個檢索條件。"}
                   </p>
                 </div>
@@ -8977,15 +9147,25 @@ function App() {
                               beginViewEntry(result.entryId, advancedHighlightQuery);
                             }}
                           >
-                            <div
-                              className="search-path"
-                              dangerouslySetInnerHTML={{
-                                __html: renderHighlightedPlainText(
-                                  `${result.projectTitle} / ${result.chapterTitle}`,
-                                  advancedHighlightQuery,
-                                ),
-                              }}
-                            />
+                            <div className="advanced-result-top">
+                              <div
+                                className="search-path"
+                                dangerouslySetInnerHTML={{
+                                  __html: renderHighlightedPlainText(
+                                    `${result.projectTitle} / ${result.chapterTitle}`,
+                                    advancedHighlightQuery,
+                                  ),
+                                }}
+                              />
+                              {result.similarity !== undefined && (
+                                <span
+                                  className="metric-chip metric-accent"
+                                  title="與檢索詞最接近的一處的相似度（1 − 編輯距離 ÷ 字數）"
+                                >
+                                  相似 {Math.round(result.similarity * 100)}%
+                                </span>
+                              )}
+                            </div>
                             <div
                               className="search-time"
                               dangerouslySetInnerHTML={{
